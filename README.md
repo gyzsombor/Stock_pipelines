@@ -2,39 +2,37 @@
 
 ## Purpose
 
-This project is a multi-asset market analytics system. It downloads market data, engineers technical features, generates rule-based signals, applies machine learning models, integrates news sentiment, performs backtesting, and displays results in a Streamlit dashboard.
-
-This README is written so a grader can run the project on a new machine without asking questions.
+This project is a multi-asset market analytics system. It downloads market data, creates technical features, generates signals, applies machine learning models, integrates news sentiment, runs backtesting, and displays everything in a Streamlit dashboard.
 
 ---
 
-## Files Needed
+## Project Structure
 
 Main folder:
-- App.py
-- visuals.py
-- requirements.txt
-- watchlist.csv
-- README.md
+- `App.py`
+- `visuals.py`
+- `requirements.txt`
+- `watchlist.csv`
+- `README.md`
 
-src/ folder:
-- __init__.py
-- pipeline.py
-- config.py
-- io_utils.py
-- features.py
-- signals.py
-- news_features.py
-- modeling.py
-- backtest.py
-- portfolio.py
+`src/` folder:
+- `__init__.py`
+- `pipeline.py`
+- `config.py`
+- `io_utils.py`
+- `features.py`
+- `signals.py`
+- `news_features.py`
+- `modeling.py`
+- `backtest.py`
+- `portfolio.py`
 
 ---
 
-## System Requirements
+## Requirements
 
-- Windows + PowerShell
-- Python 3.10 or newer
+- Windows + PowerShell (or any terminal)
+- Python 3.10+
 - Git installed
 - Internet connection
 
@@ -49,7 +47,7 @@ git clone https://github.com/gyzsombor/Stock_pipelines.git
 cd Stock_pipelines
 ```
 
-Create virtual environment:
+Create a virtual environment:
 
 ```powershell
 python -m venv .venv
@@ -69,15 +67,15 @@ pip install -r requirements.txt
 
 ---
 
-## Run the Project
+## Running the Project
 
-Run pipeline:
+Run the data pipeline:
 
 ```powershell
 python src/pipeline.py
 ```
 
-Run dashboard:
+Launch the dashboard:
 
 ```powershell
 streamlit run App.py
@@ -85,35 +83,24 @@ streamlit run App.py
 
 ---
 
-## First Run Notes
+## How It Works
 
-- `data/` and `db/` folders are created automatically
-- No pre-generated files are required
-- Always run the pipeline before opening the dashboard
+Running the pipeline will:
 
----
-
-## What the Pipeline Does
-
-Running:
-
-```powershell
-python src/pipeline.py
-```
-
-Will:
 - load symbols from `watchlist.csv`
 - download market data
-- generate features
-- create signals
+- generate technical features
+- create rule-based signals
 - collect news and compute sentiment
-- save outputs locally
+- store results locally
+
+The Streamlit app then reads this data and displays insights, signals, and performance.
 
 ---
 
 ## Watchlist
 
-Edit `watchlist.csv` to change assets, then rerun:
+To change the assets, edit `watchlist.csv` and run the pipeline again:
 
 ```powershell
 python src/pipeline.py
@@ -121,35 +108,29 @@ python src/pipeline.py
 
 ---
 
-## Grading Order
+## Notes
 
-1. Run:
-```powershell
-python src/pipeline.py
-```
-
-2. Then:
-```powershell
-streamlit run App.py
-```
+- The `data/` and `db/` folders are created automatically
+- No pre-generated files are required
+- Run the pipeline before opening the dashboard
 
 ---
 
 ## Troubleshooting
 
-If activation fails:
+If virtual environment activation fails:
 
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
 
-If packages are missing:
+If dependencies are missing:
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-If Streamlit fails:
+If Streamlit does not start:
 
 ```powershell
 python -m streamlit run App.py
@@ -159,5 +140,4 @@ python -m streamlit run App.py
 
 ## Author
 
-Zsombor Gyemant  
-MSBA 265 – Business Analytics Topics
+Zsombor Gyemant
