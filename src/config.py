@@ -1,4 +1,3 @@
-
 WATCHLIST_PATH = "watchlist.csv"
 DB_PATH = "db/market_research.duckdb"
 TABLE_NAME = "prices_daily"
@@ -36,11 +35,22 @@ MODEL_FEATURES = [
     "news_avg_sentiment",
     "news_positive_ratio",
     "news_negative_ratio",
+    "news_sentiment_3d",
+    "news_sentiment_7d",
+    "news_count_3d",
+    "news_count_7d",
+    "news_impact_score_3d",
+    "news_decayed_sentiment_7d",
+    "market_news_sentiment_3d",
+    "market_news_sentiment_7d",
+    "market_news_impact_score_3d",
+    "market_news_count_3d",
 ]
 
 MIN_MODEL_ROWS = 120
 
-NEWS_MAX_HEADLINES_PER_SYMBOL = 8
+NEWS_MAX_HEADLINES_PER_SYMBOL = 20
+MARKET_NEWS_MAX_HEADLINES = 30
 NEWS_LOOKBACK_DAYS = 14
 
 WALK_FORWARD_TRAIN_WINDOW = 160

@@ -22,6 +22,7 @@ from features import add_features
 from io_utils import ensure_dirs, fetch_ohlcv_batch, load_watchlist
 from news_features import (
     build_daily_news_features,
+    fetch_market_news,
     fetch_symbol_news,
     merge_news_features_into_market,
     summarize_news,
@@ -82,8 +83,14 @@ def add_news_data(clean: pd.DataFrame, symbols: list[str]) -> pd.DataFrame:
             symbols=symbols,
             max_headlines_per_symbol=NEWS_MAX_HEADLINES_PER_SYMBOL,
         )
+        market_headlines = fetch_market_news()
         news_summary = summarize_news(news_headlines)
-        news_daily = build_daily_news_features(news_headlines)
+
+        news_daily = build_daily_news_features(
+            market_df=clean[["symbol", "date"]].copy(),
+            symbol_news_df=news_headlines,
+            market_news_df=market_headlines,
+        )
 
         news_headlines.to_csv(NEWS_HEADLINES_PATH, index=False)
         news_summary.to_csv(NEWS_SUMMARY_PATH, index=False)
@@ -104,8 +111,17 @@ def add_news_data(clean: pd.DataFrame, symbols: list[str]) -> pd.DataFrame:
         clean["news_negative_ratio"] = 0.0
         clean["news_latest_sentiment"] = 0.0
         clean["news_has_any"] = 0
+        clean["news_sentiment_3d"] = 0.0
+        clean["news_sentiment_7d"] = 0.0
+        clean["news_count_3d"] = 0
+        clean["news_count_7d"] = 0
+        clean["news_impact_score_3d"] = 0.0
+        clean["news_decayed_sentiment_7d"] = 0.0
+        clean["market_news_sentiment_3d"] = 0.0
+        clean["market_news_sentiment_7d"] = 0.0
+        clean["market_news_impact_score_3d"] = 0.0
+        clean["market_news_count_3d"] = 0
         return clean
-
 
 def main() -> None:
     ensure_dirs()
