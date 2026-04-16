@@ -1,0 +1,11 @@
+
+duckdb
+numpy
+pandas
+plotly
+streamlit
+tqdm
+yfinance
+scikit-learn
+feedparser
+vaderSentiment
