@@ -28,8 +28,8 @@ SRC_DIR = BASE_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from backtest import run_hybrid_recommendation_backtest, run_portfolio_backtest, run_symbol_backtest
-from config import (
+from src.backtest import run_hybrid_recommendation_backtest, run_portfolio_backtest, run_symbol_backtest
+from src.config import (
     APP_TITLE,
     BENCHMARK_SYMBOL,
     DEFAULT_PROB_THRESHOLD,
@@ -44,8 +44,8 @@ from config import (
     ROLLING_OPT_HOLD_WINDOW,
     ROLLING_OPT_TRAIN_WINDOW,
 )
-from llm_explainer import generate_analyst_memo_llm
-from modeling import (
+from src.llm_explainer import generate_analyst_memo_llm
+from src.modeling import (
     build_analyst_engine,
     confidence_band,
     export_walk_forward_outputs,
@@ -53,7 +53,7 @@ from modeling import (
     run_symbol_models,
     run_walk_forward_models,
 )
-from portfolio import equal_weight_weights, max_sharpe_like_weights, min_vol_weights, rolling_optimized_portfolio
+from src.portfolio import equal_weight_weights, max_sharpe_like_weights, min_vol_weights, rolling_optimized_portfolio
 
 DATA_PATH = BASE_DIR / OUTPUT_CSV_PATH
 NEWS_HEADLINES_FILE = BASE_DIR / NEWS_HEADLINES_PATH
@@ -468,7 +468,7 @@ if analyst is not None:
     )
     st.markdown(f"<div class='memo-box'>{llm_note['memo']}</div>", unsafe_allow_html=True)
     st.caption(f"Memo mode: {llm_note.get('mode', 'unknown')}")
-    
+
     section_title(
         "Key Reasons",
         "These are the main evidence points behind the current recommendation.",
