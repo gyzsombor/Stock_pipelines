@@ -2,6 +2,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
 import streamlit as st
@@ -43,10 +44,12 @@ from config import (
     ROLLING_OPT_HOLD_WINDOW,
     ROLLING_OPT_TRAIN_WINDOW,
 )
+from llm_explainer import generate_analyst_memo_llm
 from modeling import (
-    build_hybrid_recommendation,
-    explain_hybrid_contributions,
+    build_analyst_engine,
+    confidence_band,
     export_walk_forward_outputs,
+    risk_level_from_penalty,
     run_symbol_models,
     run_walk_forward_models,
 )
@@ -57,70 +60,100 @@ NEWS_HEADLINES_FILE = BASE_DIR / NEWS_HEADLINES_PATH
 NEWS_SUMMARY_FILE = BASE_DIR / NEWS_SUMMARY_PATH
 PIPELINE_PATH = SRC_DIR / "pipeline.py"
 
+st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
 
-def section_title(title: str, help_text: str):
-    col1, col2 = st.columns([20, 1])
-    with col1:
+st.markdown(
+    """
+    <style>
+    .app-card {
+        border: 1px solid #e7e7e7;
+        border-radius: 18px;
+        padding: 18px 18px 14px 18px;
+        background: #ffffff;
+        min-height: 128px;
+    }
+    .app-card-label {
+        font-size: 0.95rem;
+        color: #666666;
+        margin-bottom: 0.65rem;
+    }
+    .app-card-value {
+        font-size: 2.0rem;
+        line-height: 1.15;
+        font-weight: 700;
+        word-break: break-word;
+        overflow-wrap: anywhere;
+    }
+    .app-card-sub {
+        font-size: 0.86rem;
+        color: #666666;
+        margin-top: 0.4rem;
+    }
+    .memo-box {
+        border: 1px solid #ececec;
+        border-radius: 18px;
+        padding: 18px;
+        background: #fafafa;
+    }
+    .pill-box {
+        border: 1px solid #ececec;
+        border-radius: 14px;
+        padding: 12px 14px;
+        background: #fafafa;
+        margin-bottom: 10px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def section_title(title: str, help_text: str) -> None:
+    c1, c2 = st.columns([25, 1])
+    with c1:
         st.markdown(f"### {title}")
-    with col2:
+    with c2:
         st.markdown("ℹ️", help=help_text)
 
 
-def confidence_band(score: float) -> str:
-    if score >= 0.70:
-        return "High"
-    if score >= 0.58:
-        return "Moderate"
-    return "Low"
-
-
-def risk_level(penalty: float) -> str:
-    if penalty >= 0.12:
-        return "High"
-    if penalty >= 0.06:
-        return "Moderate"
-    return "Low"
-
-
-def news_support_label(row: pd.Series) -> str:
-    count_3d = float(row.get("news_count_3d", 0))
-    impact_3d = float(row.get("news_impact_score_3d", 0.0))
-    market_count = float(row.get("market_news_count_3d", 0))
-    if count_3d >= 3 or abs(impact_3d) >= 0.12 or market_count >= 4:
-        return "High"
-    if count_3d >= 1 or market_count >= 2:
-        return "Moderate"
-    return "Low"
-
-
-def clean_reason_lines(reason_text: str) -> list[str]:
-    if not isinstance(reason_text, str) or not reason_text.strip():
-        return ["Signals are mixed and conviction is limited."]
-    parts = [p.strip().capitalize() for p in reason_text.replace(".", "").split(";") if p.strip()]
-    return parts[:8] if parts else ["Signals are mixed and conviction is limited."]
-
-
 def card_html(label: str, value: str, subtitle: str | None = None) -> str:
-    subtitle_html = f"<div style='font-size:0.85rem;color:#666;margin-top:0.35rem;'>{subtitle}</div>" if subtitle else ""
+    subtitle_html = f"<div class='app-card-sub'>{subtitle}</div>" if subtitle else ""
     return f"""
-    <div style="
-        border:1px solid #e6e6e6;
-        border-radius:16px;
-        padding:18px 18px 14px 18px;
-        background:#ffffff;
-        min-height:120px;
-    ">
-        <div style="font-size:0.95rem;color:#555;margin-bottom:0.75rem;">{label}</div>
-        <div style="
-            font-size:2.2rem;
-            line-height:1.15;
-            font-weight:700;
-            word-break:break-word;
-            overflow-wrap:anywhere;
-        ">{value}</div>
+    <div class="app-card">
+        <div class="app-card-label">{label}</div>
+        <div class="app-card-value">{value}</div>
         {subtitle_html}
     </div>
     """
+
+
+def pill_html(title: str, value: str) -> str:
+    return f"""
+    <div class="pill-box">
+        <div style="font-size:0.85rem;color:#666;">{title}</div>
+        <div style="font-size:1.05rem;font-weight:600;margin-top:0.25rem;">{value}</div>
+    </div>
+    """
+
+
+def safe_float(value, default: float = 0.0) -> float:
+    try:
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def news_support_label(row: pd.Series) -> str:
+    count_3d = safe_float(row.get("news_count_3d", 0))
+    impact_3d = abs(safe_float(row.get("news_impact_score_3d", 0.0)))
+    market_count_3d = safe_float(row.get("market_news_count_3d", 0))
+    if count_3d >= 3 or impact_3d >= 0.12 or market_count_3d >= 4:
+        return "High"
+    if count_3d >= 1 or market_count_3d >= 2:
+        return "Moderate"
+    return "Low"
 
 
 def run_pipeline() -> tuple[bool, str]:
@@ -192,15 +225,9 @@ def build_summary_table(df: pd.DataFrame) -> pd.DataFrame:
         "news_impact_score_3d",
         "market_news_sentiment_3d",
     ]
-    existing_cols = [c for c in cols if c in latest.columns]
-    latest = latest[existing_cols].sort_values(["signal_score", "symbol"], ascending=[False, True]).reset_index(drop=True)
-    latest = latest.rename(
-        columns={
-            "date": "latest_date",
-            "close": "latest_close",
-            "volatility_30d_annualized": "volatility_30d_ann_pct",
-        }
-    )
+    existing = [c for c in cols if c in latest.columns]
+    latest = latest[existing].sort_values(["signal_score", "symbol"], ascending=[False, True]).reset_index(drop=True)
+    latest = latest.rename(columns={"date": "latest_date", "close": "latest_close", "volatility_30d_annualized": "volatility_30d_ann_pct"})
     return latest
 
 
@@ -218,24 +245,6 @@ def build_data_health_table(df: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows).sort_values("symbol").reset_index(drop=True)
-
-
-def plot_walkforward_equity(predictions_df: pd.DataFrame) -> go.Figure:
-    fig = go.Figure()
-    for model_name, group in predictions_df.groupby("model"):
-        temp = group.sort_values("date").copy()
-        temp["strategy_equity"] = (1.0 + temp["strategy_return_decimal"].fillna(0.0)).cumprod()
-        temp["buyhold_equity"] = (1.0 + temp["buyhold_return_decimal"].fillna(0.0)).cumprod()
-        fig.add_trace(go.Scatter(x=temp["date"], y=temp["strategy_equity"], mode="lines", name=f"{model_name} Strategy"))
-        fig.add_trace(go.Scatter(x=temp["date"], y=temp["buyhold_equity"], mode="lines", name=f"{model_name} Buy & Hold"))
-    fig.update_layout(
-        title="Model Strategy vs Buy & Hold",
-        xaxis_title="Date",
-        yaxis_title="Growth of $1",
-        template="plotly_white",
-        hovermode="x unified",
-    )
-    return fig
 
 
 def plot_confidence_history(hist_df: pd.DataFrame, symbol: str) -> go.Figure:
@@ -257,16 +266,15 @@ def build_recommendation_history(symbol_df: pd.DataFrame, latest_preds: pd.DataF
     rows = []
 
     for _, row in recent.iterrows():
-        card = build_hybrid_recommendation(row, latest_preds, wf_metrics)
+        analyst = build_analyst_engine(row, latest_preds, wf_metrics)
         rows.append(
             {
                 "date": row["date"],
                 "symbol": row["symbol"],
-                "recommendation": card["recommendation"],
-                "confidence_score": card["confidence_score"],
-                "risk_penalty": card["risk_penalty"],
-                "model_agreement": card["model_agreement"],
-                "note": "Uses current model outputs with historical market features",
+                "recommendation": analyst["recommendation"],
+                "confidence_score": analyst["confidence_score"],
+                "risk_penalty": analyst["risk_penalty"],
+                "model_agreement": analyst["model_agreement"],
             }
         )
 
@@ -294,11 +302,27 @@ def plot_recommendation_history(hist_df: pd.DataFrame, symbol: str) -> go.Figure
     return fig
 
 
-st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
-st.title(APP_TITLE)
-st.caption("Market decision-support dashboard combining technical signals, machine learning, news context, and portfolio analytics.")
+def plot_walkforward_equity(predictions_df: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    for model_name, group in predictions_df.groupby("model"):
+        temp = group.sort_values("date").copy()
+        temp["strategy_equity"] = (1.0 + temp["strategy_return_decimal"].fillna(0.0)).cumprod()
+        temp["buyhold_equity"] = (1.0 + temp["buyhold_return_decimal"].fillna(0.0)).cumprod()
+        fig.add_trace(go.Scatter(x=temp["date"], y=temp["strategy_equity"], mode="lines", name=f"{model_name} Strategy"))
+        fig.add_trace(go.Scatter(x=temp["date"], y=temp["buyhold_equity"], mode="lines", name=f"{model_name} Buy & Hold"))
+    fig.update_layout(
+        title="Model Strategy vs Buy & Hold",
+        xaxis_title="Date",
+        yaxis_title="Growth of $1",
+        template="plotly_white",
+        hovermode="x unified",
+    )
+    return fig
 
-# Sidebar
+
+st.title(APP_TITLE)
+st.caption("AI-assisted analyst engine with explainable decision logic, technical validation, news context, and portfolio research.")
+
 st.sidebar.header("Main Controls")
 
 if st.sidebar.button("Run / Refresh Pipeline", use_container_width=True):
@@ -335,6 +359,7 @@ selected_symbol = st.sidebar.selectbox("Select Asset", symbols_filtered, index=0
 default_compare = symbols_filtered[: min(MAX_COMPARE_DEFAULT, len(symbols_filtered))]
 compare_symbols = st.sidebar.multiselect("Compare Assets", symbols_filtered, default=default_compare)
 portfolio_symbols = st.sidebar.multiselect("Portfolio Assets", symbols_filtered, default=default_compare if default_compare else symbols_filtered[:1])
+
 benchmark_symbol = BENCHMARK_SYMBOL if BENCHMARK_SYMBOL in symbols_filtered else (symbols_filtered[0] if symbols_filtered else BENCHMARK_SYMBOL)
 
 with st.sidebar.expander("Optional Settings", expanded=False):
@@ -344,7 +369,7 @@ with st.sidebar.expander("Optional Settings", expanded=False):
         max_value=0.80,
         value=float(DEFAULT_PROB_THRESHOLD),
         step=0.01,
-        help="Higher threshold means the system needs stronger model support before acting.",
+        help="Higher threshold means the system requires stronger model support before acting.",
     )
     transaction_cost_bps = st.number_input(
         "Estimated Trading Cost (bps)",
@@ -352,7 +377,7 @@ with st.sidebar.expander("Optional Settings", expanded=False):
         max_value=100,
         value=DEFAULT_TRANSACTION_COST_BPS,
         step=1,
-        help="Applied in backtesting to keep strategy results more realistic.",
+        help="Applied in backtesting to keep performance estimates more realistic.",
     )
     slippage_bps = st.number_input(
         "Estimated Execution Slippage (bps)",
@@ -360,13 +385,13 @@ with st.sidebar.expander("Optional Settings", expanded=False):
         max_value=100,
         value=DEFAULT_SLIPPAGE_BPS,
         step=1,
-        help="Represents price movement or execution friction during trading.",
+        help="Represents friction between expected and executed trade price.",
     )
 
 with st.sidebar.expander("Advanced Research Settings", expanded=False):
     strategy_mode = st.selectbox("Strategy Mode", ["long_only", "long_short"], index=0)
     use_signal_filter = st.checkbox("Use Signal Filter In Portfolio", value=False)
-    train_window = st.number_input("Train Window", min_value=40, max_value=120, value=80, step=10)
+    train_window = st.number_input("Train Window", min_value=40, max_value=120, value=100, step=10)
     test_window = st.number_input("Test Window", min_value=5, max_value=30, value=20, step=5)
     rebalance_frequency = st.selectbox(
         "Rebalance Frequency",
@@ -379,17 +404,6 @@ with st.sidebar.expander("Advanced Research Settings", expanded=False):
 summary_table = build_summary_table(filtered_data)
 latest_row = filtered_data[filtered_data["symbol"] == selected_symbol].sort_values("date").iloc[-1]
 data_health = build_data_health_table(filtered_data)
-
-with st.expander("How to read this dashboard", expanded=False):
-    st.markdown(
-        """
-        - **Final Recommendation** combines technical signals, machine learning outputs, news context, and risk penalties.  
-        - **Confidence** shows how strong the overall recommendation is.  
-        - **Model Agreement** shows whether the models broadly support the same direction.  
-        - **News Support** reflects how much recent news context is available and how impactful it appears to be.  
-        - **Advanced tabs** are available for deeper validation, but the main screen is designed for fast decision support.
-        """
-    )
 
 model_metrics = pd.DataFrame()
 latest_preds = pd.DataFrame()
@@ -417,80 +431,75 @@ try:
 except Exception as e:
     wf_error = str(e)
 
-hybrid_card = None
-contrib_df = pd.DataFrame()
-hybrid_error = None
+analyst_error = None
+analyst = None
 
 try:
-    hybrid_card = build_hybrid_recommendation(latest_row, latest_preds, wf_metrics)
-    contrib_df = explain_hybrid_contributions(latest_row, latest_preds)
+    analyst = build_analyst_engine(latest_row, latest_preds, wf_metrics)
 except Exception as e:
-    hybrid_error = str(e)
+    analyst_error = str(e)
 
 section_title(
     "Final Recommendation",
-    "This is the main decision output. It combines technical structure, machine learning, recent news context, and risk penalties.",
+    "This is the main analyst output. It uses technical structure, machine learning, recent news context, and risk control to produce a disciplined view rather than a guess.",
 )
 
-if hybrid_error is not None:
-    st.error(f"Recommendation engine error: {hybrid_error}")
+if analyst_error is not None:
+    st.error(f"Analyst engine error: {analyst_error}")
 
-if hybrid_card is not None:
-    confidence_text = confidence_band(float(hybrid_card["confidence_score"]))
-    risk_text = risk_level(float(hybrid_card["risk_penalty"]))
-    news_support = news_support_label(latest_row)
+if analyst is not None:
+    llm_note = generate_analyst_memo_llm(selected_symbol, latest_row, analyst)
 
-    card1, card2, card3, card4, card5 = st.columns(5)
-
-    with card1:
-        st.markdown(
-            card_html("Decision", hybrid_card["recommendation"]),
-            unsafe_allow_html=True,
-        )
-    with card2:
-        st.markdown(
-            card_html("Confidence", f'{hybrid_card["confidence_score"]:.2f}', confidence_text),
-            unsafe_allow_html=True,
-        )
-    with card3:
-        st.markdown(
-            card_html("Model Agreement", hybrid_card["model_agreement"]),
-            unsafe_allow_html=True,
-        )
-    with card4:
-        st.markdown(
-            card_html("Risk Level", risk_text),
-            unsafe_allow_html=True,
-        )
-    with card5:
-        st.markdown(
-            card_html("News Support", news_support),
-            unsafe_allow_html=True,
-        )
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.markdown(card_html("Decision", analyst["recommendation"]), unsafe_allow_html=True)
+    with c2:
+        st.markdown(card_html("Confidence", f'{analyst["confidence_score"]:.2f}', analyst["confidence_band"]), unsafe_allow_html=True)
+    with c3:
+        st.markdown(card_html("Model Agreement", analyst["model_agreement"]), unsafe_allow_html=True)
+    with c4:
+        st.markdown(card_html("Risk Level", analyst["risk_level"]), unsafe_allow_html=True)
+    with c5:
+        st.markdown(card_html("News Support", analyst["news_support"]), unsafe_allow_html=True)
 
     section_title(
-        "Why this decision?",
-        "These are the main reasons driving the current recommendation. They summarize technical structure, model support, news context, and risk concerns.",
+        "Analyst Memo",
+        "This is the professional-language explanation layer. It turns model outputs, technical structure, and news context into readable analyst-style guidance.",
     )
-
-    reason_lines = clean_reason_lines(hybrid_card["reason_text"])
-    for reason in reason_lines:
+    st.markdown(f"<div class='memo-box'>{llm_note['memo']}</div>", unsafe_allow_html=True)
+    st.caption(f"Memo mode: {llm_note.get('mode', 'unknown')}")
+    
+    section_title(
+        "Key Reasons",
+        "These are the main evidence points behind the current recommendation.",
+    )
+    for reason in analyst["reasons"]:
         st.markdown(f"- {reason}")
 
-    if not contrib_df.empty:
-        with st.expander("Decision components", expanded=False):
+    with st.expander("Decision components", expanded=False):
+        left, right = st.columns(2)
+        with left:
+            st.markdown(pill_html("Technical Probability", f'{analyst["technical_probability"]:.2f}'), unsafe_allow_html=True)
+            st.markdown(pill_html("Model Probability", f'{analyst["model_probability"]:.2f}'), unsafe_allow_html=True)
+        with right:
+            st.markdown(pill_html("Context Probability", f'{analyst["context_probability"]:.2f}'), unsafe_allow_html=True)
+            st.markdown(pill_html("Validation Quality", analyst["quality_label"]), unsafe_allow_html=True)
+
+        st.dataframe(analyst["component_table"], use_container_width=True)
+
+        if not analyst["model_breakdown"].empty:
             st.dataframe(
-                contrib_df[["component", "raw_value", "weighted_contribution"]],
+                analyst["model_breakdown"][["model", "probability", "weight", "weighted_probability"]],
                 use_container_width=True,
             )
 
 section_title(
     "Market Summary",
-    "This table ranks the latest state of each asset using recent trend, momentum, risk, and news context.",
+    "This table gives a quick ranking view across assets using recent trend, momentum, relative strength, and news context.",
 )
 st.dataframe(summary_table, use_container_width=True)
 
-tabs = st.tabs(["Overview", "News & Context", "Strategy", "Portfolio", "Advanced"])
+tabs = st.tabs(["Executive View", "News & Context", "Strategy Validation", "Portfolio Lab", "Advanced Research"])
 overview_tab, news_tab, strategy_tab, portfolio_tab, advanced_tab = tabs
 
 with overview_tab:
@@ -512,6 +521,19 @@ with overview_tab:
         except Exception as e:
             st.info(f"Confidence history unavailable: {e}")
 
+    section_title(
+        "Regime Snapshot",
+        "This summarizes how the current market environment looks for the selected asset.",
+    )
+    if analyst is not None:
+        r1, r2, r3 = st.columns(3)
+        with r1:
+            st.markdown(pill_html("Trend Regime", analyst["regime"]["trend_regime"]), unsafe_allow_html=True)
+        with r2:
+            st.markdown(pill_html("Volatility Regime", analyst["regime"]["vol_regime"]), unsafe_allow_html=True)
+        with r3:
+            st.markdown(pill_html("Relative Strength", analyst["regime"]["strength_regime"]), unsafe_allow_html=True)
+
     with st.expander("Technical Detail", expanded=False):
         left, right = st.columns(2)
         with left:
@@ -527,11 +549,11 @@ with news_tab:
 
     section_title(
         "News Context",
-        "This section shows whether recent headlines are supportive, negative, or limited. It helps explain whether the recommendation has news support or relies mostly on technical and model signals.",
+        "This section separates symbol-specific headlines from broader market context so the user can see whether the decision is supported by meaningful external information.",
     )
 
-    row_left, row_right = st.columns(2)
-    with row_left:
+    left, right = st.columns(2)
+    with left:
         if not symbol_news_summary.empty:
             row = symbol_news_summary.iloc[0]
             n1, n2, n3, n4 = st.columns(4)
@@ -543,22 +565,24 @@ with news_tab:
         else:
             st.info("No recent symbol-specific news summary is available for the selected asset.")
 
-    with row_right:
-        news_metric_cols = [
+    with right:
+        metric_cols = [
             "news_headline_count",
             "news_sentiment_3d",
             "news_sentiment_7d",
             "news_impact_score_3d",
             "news_decayed_sentiment_7d",
+            "news_high_impact_count_3d",
+            "news_macro_event_count_3d",
+            "news_company_event_count_3d",
             "market_news_sentiment_3d",
             "market_news_impact_score_3d",
+            "market_macro_event_count_3d",
         ]
-        existing_news_metric_cols = [c for c in news_metric_cols if c in latest_row.index]
-        if existing_news_metric_cols:
+        available = [c for c in metric_cols if c in latest_row.index]
+        if available:
             st.dataframe(
-                pd.DataFrame(
-                    {"metric": existing_news_metric_cols, "value": [latest_row[c] for c in existing_news_metric_cols]}
-                ),
+                pd.DataFrame({"metric": available, "value": [latest_row[c] for c in available]}),
                 use_container_width=True,
                 hide_index=True,
             )
@@ -566,10 +590,22 @@ with news_tab:
     if not symbol_news.empty:
         section_title(
             "Recent Headlines",
-            "These are the latest headlines used as part of the news context layer. They help explain whether the system is reacting to supportive, neutral, or negative information.",
+            "These are the headlines feeding the context layer. This helps the user see whether the recommendation is reacting to meaningful events or operating with limited news support.",
         )
         st.dataframe(
-            symbol_news[["published_at", "headline", "source", "headline_sentiment", "headline_sentiment_label", "link"]],
+            symbol_news[
+                [
+                    "published_at",
+                    "headline",
+                    "source",
+                    "headline_sentiment",
+                    "headline_sentiment_label",
+                    "event_type",
+                    "event_scope",
+                    "impact_bucket",
+                    "link",
+                ]
+            ],
             use_container_width=True,
         )
     else:
@@ -578,7 +614,7 @@ with news_tab:
 with strategy_tab:
     section_title(
         "Strategy Validation",
-        "This section shows how the system behaves when translated into trading rules. It is not a guarantee of future performance, but it helps validate consistency and realism.",
+        "This section tests how the system behaves when translated into actual strategy rules. It is a validation layer, not a promise of future returns.",
     )
 
     try:
@@ -617,8 +653,8 @@ with strategy_tab:
 
 with portfolio_tab:
     section_title(
-        "Portfolio Analytics",
-        "This section compares different allocation styles so the user can evaluate not only one asset, but also how multiple assets behave together in a portfolio.",
+        "Portfolio Lab",
+        "This section compares multiple allocation styles so the user can move beyond single-asset analysis and evaluate how ideas behave inside a portfolio.",
     )
 
     if portfolio_symbols:
@@ -693,8 +729,8 @@ with portfolio_tab:
 
 with advanced_tab:
     section_title(
-        "Advanced Validation",
-        "This area is for deeper inspection of model quality, feature influence, raw outputs, and research diagnostics.",
+        "Advanced Research",
+        "This area keeps the research layer visible for analyst users without crowding the main decision experience.",
     )
 
     if model_error is not None:
@@ -702,9 +738,9 @@ with advanced_tab:
     if wf_error is not None:
         st.warning(f"Walk-forward metrics unavailable: {wf_error}")
 
-    adv1, adv2 = st.columns(2)
+    a1, a2 = st.columns(2)
 
-    with adv1:
+    with a1:
         if not model_metrics.empty:
             st.markdown("**Standard Model Metrics**")
             st.dataframe(model_metrics, use_container_width=True)
@@ -717,20 +753,20 @@ with advanced_tab:
             st.markdown("**Logistic Feature Influence**")
             st.plotly_chart(plot_logistic_coefficients(coef_df, selected_symbol), use_container_width=True)
 
-    with adv2:
+    with a2:
         st.markdown("**Data Health**")
         st.dataframe(data_health, use_container_width=True)
 
         if compare_symbols:
-            st.markdown("**Asset Comparison**")
+            st.markdown("**Normalized Comparison**")
             st.plotly_chart(plot_compare_normalized(filtered_data, compare_symbols), use_container_width=True)
 
     with st.expander("More Technical Charts", expanded=False):
-        tc1, tc2 = st.columns(2)
-        with tc1:
+        t1, t2 = st.columns(2)
+        with t1:
             st.plotly_chart(plot_daily_returns(filtered_data, selected_symbol), use_container_width=True)
             st.plotly_chart(plot_compare_close(filtered_data, compare_symbols), use_container_width=True)
-        with tc2:
+        with t2:
             st.plotly_chart(plot_risk_adjusted_return(filtered_data, selected_symbol), use_container_width=True)
             try:
                 symbol_hist = filtered_data[filtered_data["symbol"] == selected_symbol].sort_values("date").copy()

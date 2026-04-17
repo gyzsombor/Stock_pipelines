@@ -1,10 +1,28 @@
 # Stock Pipelines
 
-## Purpose
+## Overview
 
-This project is a multi-asset market analytics system. It downloads market data, creates technical features, generates signals, applies machine learning models, integrates news sentiment, runs backtesting, and displays everything in a Streamlit dashboard.
+This project is a multi-asset market analytics and decision-support system. It collects market data, builds technical features, processes financial news, applies machine learning models, and presents results in a Streamlit dashboard.
+
+The goal is to provide a structured **analyst-style recommendation**, not random predictions.
 
 ---
+
+## What This Project Does
+
+- Downloads market data for multiple assets
+- Creates technical indicators (returns, volatility, RSI, etc.)
+- Generates rule-based signals
+- Processes news with sentiment and event logic
+- Trains machine learning models
+- Runs walk-forward validation
+- Produces recommendations and confidence scores
+- Displays everything in an interactive dashboard
+
+---
+
+## Project Structure
+
 
 ## Project Structure
 

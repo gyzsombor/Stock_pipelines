@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -16,30 +15,31 @@ from sklearn.preprocessing import StandardScaler
 
 from config import (
     DEFAULT_PROB_THRESHOLD,
-    ENSEMBLE_GB_WEIGHT,
-    ENSEMBLE_LOGISTIC_WEIGHT,
-    ENSEMBLE_MLP_WEIGHT,
-    ENSEMBLE_NEWS_WEIGHT,
-    ENSEMBLE_RF_WEIGHT,
-    ENSEMBLE_SIGNAL_WEIGHT,
     MIN_MODEL_ROWS,
     MODEL_BACKTEST_EXPORT_PATH,
     MODEL_FEATURES,
     PREDICTION_HORIZON_DAYS,
     PREDICTIONS_EXPORT_PATH,
+    RECENT_MODEL_WINDOW,
     TARGET_RETURN_THRESHOLD,
     TRADING_DAYS_PER_YEAR,
     WALK_FORWARD_TEST_WINDOW,
     WALK_FORWARD_TRAIN_WINDOW,
 )
 
-model_error = None
-wf_error = None
 
-try:
-    model_metrics, latest_preds, coef_df = run_symbol_models(...)
-except Exception as e:
-    model_error = str(e)
+def clip01(x: float) -> float:
+    return float(max(0.0, min(1.0, x)))
+
+
+def safe_float(value, default: float = 0.0) -> float:
+    try:
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
 
 def _prepare_symbol_model_data(df: pd.DataFrame, symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     subset = df[df["symbol"] == symbol].sort_values("date").copy()
@@ -56,10 +56,7 @@ def _prepare_symbol_model_data(df: pd.DataFrame, symbol: str) -> tuple[pd.DataFr
     ).astype(float)
 
     subset = subset.dropna(subset=MODEL_FEATURES).copy()
-
-    # Keep modeling focused on the recent window where news features are actually meaningful
-    subset = subset.tail(120).copy()
-
+    subset = subset.tail(RECENT_MODEL_WINDOW).copy()
     labeled = subset.dropna(subset=["target_up_move", "target_forward_return_decimal"]).copy()
 
     if len(labeled) < MIN_MODEL_ROWS:
@@ -95,54 +92,71 @@ def _train_valid_split(train_df: pd.DataFrame, valid_fraction: float = 0.2) -> t
 
 
 def _make_logistic_model(C: float, class_weight):
-    return Pipeline([
-        ("imputer", SimpleImputer(strategy="median")),
-        ("scaler", StandardScaler()),
-        ("model", LogisticRegression(max_iter=2000, random_state=42, C=C, class_weight=class_weight)),
-    ])
+    return Pipeline(
+        [
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+            ("model", LogisticRegression(max_iter=2000, random_state=42, C=C, class_weight=class_weight)),
+        ]
+    )
 
 
 def _make_mlp_model(hidden_layer_sizes: tuple, alpha: float):
-    return Pipeline([
-        ("imputer", SimpleImputer(strategy="median")),
-        ("scaler", StandardScaler()),
-        ("model", MLPClassifier(
-            hidden_layer_sizes=hidden_layer_sizes,
-            activation="relu",
-            solver="adam",
-            alpha=alpha,
-            max_iter=1000,
-            random_state=42,
-            early_stopping=True,
-            validation_fraction=0.15,
-            n_iter_no_change=20,
-        )),
-    ])
+    return Pipeline(
+        [
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+            (
+                "model",
+                MLPClassifier(
+                    hidden_layer_sizes=hidden_layer_sizes,
+                    activation="relu",
+                    solver="adam",
+                    alpha=alpha,
+                    max_iter=1000,
+                    random_state=42,
+                    early_stopping=True,
+                    validation_fraction=0.15,
+                    n_iter_no_change=20,
+                ),
+            ),
+        ]
+    )
 
 
 def _make_rf_model(n_estimators: int, max_depth: int | None):
-    return Pipeline([
-        ("imputer", SimpleImputer(strategy="median")),
-        ("model", RandomForestClassifier(
-            n_estimators=n_estimators,
-            max_depth=max_depth,
-            min_samples_leaf=3,
-            random_state=42,
-            n_jobs=-1,
-        )),
-    ])
+    return Pipeline(
+        [
+            ("imputer", SimpleImputer(strategy="median")),
+            (
+                "model",
+                RandomForestClassifier(
+                    n_estimators=n_estimators,
+                    max_depth=max_depth,
+                    min_samples_leaf=3,
+                    random_state=42,
+                    n_jobs=-1,
+                ),
+            ),
+        ]
+    )
 
 
 def _make_gb_model(n_estimators: int, learning_rate: float, max_depth: int):
-    return Pipeline([
-        ("imputer", SimpleImputer(strategy="median")),
-        ("model", GradientBoostingClassifier(
-            n_estimators=n_estimators,
-            learning_rate=learning_rate,
-            max_depth=max_depth,
-            random_state=42,
-        )),
-    ])
+    return Pipeline(
+        [
+            ("imputer", SimpleImputer(strategy="median")),
+            (
+                "model",
+                GradientBoostingClassifier(
+                    n_estimators=n_estimators,
+                    learning_rate=learning_rate,
+                    max_depth=max_depth,
+                    random_state=42,
+                ),
+            ),
+        ]
+    )
 
 
 def _score_probs(y_true: pd.Series, probs: np.ndarray, threshold: float = 0.5) -> float:
@@ -249,8 +263,6 @@ def _train_tuned_models(train_df: pd.DataFrame):
     X_valid = valid[MODEL_FEATURES]
     y_valid = valid["target_up_move"].astype(int)
 
-    results = []
-
     _, log_cfg, log_f1 = _tune_logistic(X_subtrain, y_subtrain, X_valid, y_valid)
     _, mlp_cfg, mlp_f1 = _tune_mlp(X_subtrain, y_subtrain, X_valid, y_valid)
     _, rf_cfg, rf_f1 = _tune_rf(X_subtrain, y_subtrain, X_valid, y_valid)
@@ -269,12 +281,14 @@ def _train_tuned_models(train_df: pd.DataFrame):
     for model in models.values():
         model.fit(X_full, y_full)
 
-    tuning_info = pd.DataFrame([
-        {"model": "Logistic Regression", "best_validation_f1": log_f1, "best_config": str(log_cfg)},
-        {"model": "Neural Net (MLP)", "best_validation_f1": mlp_f1, "best_config": str(mlp_cfg)},
-        {"model": "Random Forest", "best_validation_f1": rf_f1, "best_config": str(rf_cfg)},
-        {"model": "Gradient Boosting", "best_validation_f1": gb_f1, "best_config": str(gb_cfg)},
-    ])
+    tuning_info = pd.DataFrame(
+        [
+            {"model": "Logistic Regression", "best_validation_f1": log_f1, "best_config": str(log_cfg)},
+            {"model": "Neural Net (MLP)", "best_validation_f1": mlp_f1, "best_config": str(mlp_cfg)},
+            {"model": "Random Forest", "best_validation_f1": rf_f1, "best_config": str(rf_cfg)},
+            {"model": "Gradient Boosting", "best_validation_f1": gb_f1, "best_config": str(gb_cfg)},
+        ]
+    )
 
     return models, tuning_info
 
@@ -304,18 +318,22 @@ def run_symbol_models(df: pd.DataFrame, symbol: str) -> tuple[pd.DataFrame, pd.D
         latest_prob = float(model.predict_proba(latest_feature_row)[:, 1][0])
         latest_pred = int(latest_prob >= 0.5)
 
-        latest_rows.append({
-            "model": model_name,
-            "latest_up_probability": latest_prob,
-            "latest_predicted_class": latest_pred,
-        })
+        latest_rows.append(
+            {
+                "model": model_name,
+                "latest_up_probability": latest_prob,
+                "latest_predicted_class": latest_pred,
+            }
+        )
 
         if model_name == "Logistic Regression":
             coef_values = model.named_steps["model"].coef_[0]
-            coef_df = pd.DataFrame({
-                "feature": MODEL_FEATURES,
-                "coefficient": coef_values,
-            }).sort_values("coefficient", ascending=False).reset_index(drop=True)
+            coef_df = pd.DataFrame(
+                {
+                    "feature": MODEL_FEATURES,
+                    "coefficient": coef_values,
+                }
+            ).sort_values("coefficient", ascending=False).reset_index(drop=True)
 
     return pd.DataFrame(metrics_rows), pd.DataFrame(latest_rows), coef_df
 
@@ -365,8 +383,8 @@ def run_walk_forward_models(
 
     start = 0
     while start + train_window < len(labeled):
-        train_slice = labeled.iloc[start:start + train_window].copy()
-        test_slice = labeled.iloc[start + train_window:start + train_window + test_window].copy()
+        train_slice = labeled.iloc[start : start + train_window].copy()
+        test_slice = labeled.iloc[start + train_window : start + train_window + test_window].copy()
         if test_slice.empty:
             break
 
@@ -378,27 +396,33 @@ def run_walk_forward_models(
             probs = model.predict_proba(X_test)[:, 1]
             preds = (probs >= prob_threshold).astype(int)
 
-            temp = test_slice[[
-                "date",
-                "symbol",
-                "close",
-                "signal_score",
-                "volatility_30d_annualized",
-                "drawdown_pct",
-                "news_headline_count",
-                "news_avg_sentiment",
-                "news_positive_ratio",
-                "news_negative_ratio",
-                "news_sentiment_3d",
-                "news_sentiment_7d",
-                "news_impact_score_3d",
-                "news_decayed_sentiment_7d",
-                "market_news_sentiment_3d",
-                "market_news_sentiment_7d",
-                "market_news_impact_score_3d",
-                "target_up_move",
-                "target_forward_return_decimal",
-            ]].copy()
+            temp = test_slice[
+                [
+                    "date",
+                    "symbol",
+                    "close",
+                    "signal_score",
+                    "volatility_30d_annualized",
+                    "drawdown_pct",
+                    "news_headline_count",
+                    "news_avg_sentiment",
+                    "news_positive_ratio",
+                    "news_negative_ratio",
+                    "news_sentiment_3d",
+                    "news_sentiment_7d",
+                    "news_impact_score_3d",
+                    "news_decayed_sentiment_7d",
+                    "news_high_impact_count_3d",
+                    "news_macro_event_count_3d",
+                    "news_company_event_count_3d",
+                    "market_news_sentiment_3d",
+                    "market_news_sentiment_7d",
+                    "market_news_impact_score_3d",
+                    "market_macro_event_count_3d",
+                    "target_up_move",
+                    "target_forward_return_decimal",
+                ]
+            ].copy()
 
             temp["model"] = model_name
             temp["predicted_up_probability"] = probs
@@ -429,22 +453,24 @@ def run_walk_forward_models(
         y_pred = group["predicted_class"].astype(int)
         tune_row = global_tuning[global_tuning["model"] == model_name].iloc[0]
 
-        metric_rows.append({
-            "model": model_name,
-            "accuracy": accuracy_score(y_true, y_pred),
-            "precision": precision_score(y_true, y_pred, zero_division=0),
-            "recall": recall_score(y_true, y_pred, zero_division=0),
-            "f1": f1_score(y_true, y_pred, zero_division=0),
-            "avg_predicted_up_probability": float(group["predicted_up_probability"].mean()),
-            "trade_rate_pct": float(group["trade_flag"].mean() * 100.0),
-            "avg_news_sentiment_seen": float(group["news_avg_sentiment"].mean()),
-            "pct_rows_with_news": float((group["news_headline_count"] > 0).mean() * 100.0),
-            "best_validation_f1": float(tune_row["best_validation_f1"]),
-            "best_config": str(tune_row["best_config"]),
-            "train_window": int(train_window),
-            "test_window": int(test_window),
-            "prob_threshold": float(prob_threshold),
-        })
+        metric_rows.append(
+            {
+                "model": model_name,
+                "accuracy": accuracy_score(y_true, y_pred),
+                "precision": precision_score(y_true, y_pred, zero_division=0),
+                "recall": recall_score(y_true, y_pred, zero_division=0),
+                "f1": f1_score(y_true, y_pred, zero_division=0),
+                "avg_predicted_up_probability": float(group["predicted_up_probability"].mean()),
+                "trade_rate_pct": float(group["trade_flag"].mean() * 100.0),
+                "avg_news_sentiment_seen": float(group["news_avg_sentiment"].mean()),
+                "pct_rows_with_news": float((group["news_headline_count"] > 0).mean() * 100.0),
+                "best_validation_f1": float(tune_row["best_validation_f1"]),
+                "best_config": str(tune_row["best_config"]),
+                "train_window": int(train_window),
+                "test_window": int(test_window),
+                "prob_threshold": float(prob_threshold),
+            }
+        )
 
         strat = _strategy_metrics(group["strategy_return_decimal"])
         bench = _strategy_metrics(group["buyhold_return_decimal"])
@@ -472,176 +498,360 @@ def export_walk_forward_outputs(
     return str(pred_path), str(bt_path)
 
 
-def _clip01(x: float) -> float:
-    return float(max(0.0, min(1.0, x)))
+def detect_market_regime(row: pd.Series) -> dict:
+    ma_spread = safe_float(row.get("ma_spread_pct", 0.0))
+    vol = safe_float(row.get("volatility_30d_annualized", 0.0))
+    rel30 = safe_float(row.get("rel_return_30d_pct", 0.0))
+    rel90 = safe_float(row.get("rel_return_90d_pct", 0.0))
+
+    if ma_spread > 1.0 and rel30 > 0:
+        trend_regime = "Bullish trend"
+    elif ma_spread < -1.0 and rel30 < 0:
+        trend_regime = "Bearish trend"
+    else:
+        trend_regime = "Mixed / sideways"
+
+    if vol >= 45:
+        vol_regime = "High volatility"
+    elif vol >= 25:
+        vol_regime = "Moderate volatility"
+    else:
+        vol_regime = "Calmer conditions"
+
+    if rel90 > 5:
+        strength = "Outperforming benchmark"
+    elif rel90 < -5:
+        strength = "Underperforming benchmark"
+    else:
+        strength = "Benchmark-like performance"
+
+    return {"trend_regime": trend_regime, "vol_regime": vol_regime, "strength_regime": strength}
 
 
-def _signal_to_probability(signal_score: float) -> float:
-    return _clip01(0.5 + (float(signal_score) / 12.0))
+def confidence_band(score: float) -> str:
+    if score >= 0.72:
+        return "High"
+    if score >= 0.58:
+        return "Moderate"
+    return "Low"
 
 
-def _news_to_probability(news_avg_sentiment: float, news_positive_ratio: float, news_negative_ratio: float) -> float:
-    sentiment_component = 0.5 + (float(news_avg_sentiment) * 0.35)
-    ratio_component = 0.5 + ((float(news_positive_ratio) - float(news_negative_ratio)) * 0.25)
-    return _clip01((sentiment_component + ratio_component) / 2.0)
+def risk_level_from_penalty(penalty: float) -> str:
+    if penalty >= 0.12:
+        return "High"
+    if penalty >= 0.06:
+        return "Moderate"
+    return "Low"
 
 
-def _risk_penalty(row: pd.Series) -> tuple[float, list[str]]:
+def model_agreement_label(probs: list[float]) -> str:
+    if not probs:
+        return "Unknown"
+    gap = max(probs) - min(probs)
+    if gap <= 0.08:
+        return "High"
+    if gap <= 0.17:
+        return "Moderate"
+    return "Low"
+
+
+def news_support_label(row: pd.Series) -> str:
+    count_3d = safe_float(row.get("news_count_3d", 0))
+    impact_3d = abs(safe_float(row.get("news_impact_score_3d", 0.0)))
+    market_count_3d = safe_float(row.get("market_news_count_3d", 0))
+    if count_3d >= 3 or impact_3d >= 0.12 or market_count_3d >= 4:
+        return "High"
+    if count_3d >= 1 or market_count_3d >= 2:
+        return "Moderate"
+    return "Low"
+
+
+def compute_technical_probability(row: pd.Series) -> tuple[float, list[str]]:
+    score = safe_float(row.get("signal_score", 0.0))
+    ma_spread = safe_float(row.get("ma_spread_pct", 0.0))
+    rsi = safe_float(row.get("rsi_14", 50.0))
+    rel30 = safe_float(row.get("rel_return_30d_pct", 0.0))
+    rel90 = safe_float(row.get("rel_return_90d_pct", 0.0))
+    drawdown = safe_float(row.get("drawdown_pct", 0.0))
+
+    prob = 0.50
+    reasons = []
+
+    prob += np.clip(score / 14.0, -0.18, 0.18)
+    prob += np.clip(ma_spread / 20.0, -0.08, 0.08)
+    prob += np.clip(rel30 / 30.0, -0.08, 0.08)
+    prob += np.clip(rel90 / 50.0, -0.06, 0.06)
+
+    if 55 <= rsi <= 70:
+        prob += 0.04
+        reasons.append("Momentum is supportive without being extremely overextended")
+    elif rsi >= 75:
+        prob -= 0.05
+        reasons.append("Momentum looks extended and may be vulnerable to pullback")
+    elif rsi <= 30:
+        prob += 0.02
+        reasons.append("RSI is depressed, which may support a recovery setup")
+
+    if drawdown <= -20:
+        prob -= 0.04
+        reasons.append("Deep drawdown still adds caution")
+
+    if score >= 3:
+        reasons.append("Technical signal structure is bullish")
+    elif score <= -2:
+        reasons.append("Technical signal structure is bearish")
+
+    if rel30 > 0:
+        reasons.append("Recent relative performance versus the benchmark is positive")
+    elif rel30 < 0:
+        reasons.append("Recent relative performance versus the benchmark is weak")
+
+    return clip01(prob), reasons[:5]
+
+
+def compute_adaptive_model_probability(latest_preds: pd.DataFrame, wf_metrics: pd.DataFrame) -> tuple[float, pd.DataFrame]:
+    if latest_preds.empty:
+        breakdown = pd.DataFrame(
+            {
+                "model": ["No model outputs"],
+                "probability": [0.50],
+                "weight": [1.00],
+                "weighted_probability": [0.50],
+            }
+        )
+        return 0.50, breakdown
+
+    probs = latest_preds[["model", "latest_up_probability"]].copy()
+
+    if wf_metrics.empty or "f1" not in wf_metrics.columns:
+        probs["weight"] = 1.0
+    else:
+        metric_weights = wf_metrics[["model", "f1"]].copy()
+        metric_weights["f1"] = metric_weights["f1"].fillna(0.0).clip(lower=0.01)
+        probs = probs.merge(metric_weights, on="model", how="left")
+        probs["weight"] = probs["f1"].fillna(0.10)
+
+    if probs["weight"].sum() <= 0:
+        probs["weight"] = 1.0
+
+    probs["weight"] = probs["weight"] / probs["weight"].sum()
+    probs["weighted_probability"] = probs["latest_up_probability"] * probs["weight"]
+
+    return float(probs["weighted_probability"].sum()), probs.rename(columns={"latest_up_probability": "probability"})
+
+
+def compute_context_probability(row: pd.Series) -> tuple[float, list[str], str]:
+    news_count_3d = safe_float(row.get("news_count_3d", 0.0))
+    symbol_sent_3d = safe_float(row.get("news_sentiment_3d", 0.0))
+    symbol_sent_7d = safe_float(row.get("news_sentiment_7d", 0.0))
+    symbol_impact = safe_float(row.get("news_impact_score_3d", 0.0))
+    decayed_sent = safe_float(row.get("news_decayed_sentiment_7d", 0.0))
+    high_impact_count = safe_float(row.get("news_high_impact_count_3d", 0.0))
+    macro_event_count = safe_float(row.get("news_macro_event_count_3d", 0.0))
+    company_event_count = safe_float(row.get("news_company_event_count_3d", 0.0))
+
+    market_sent_3d = safe_float(row.get("market_news_sentiment_3d", 0.0))
+    market_sent_7d = safe_float(row.get("market_news_sentiment_7d", 0.0))
+    market_impact = safe_float(row.get("market_news_impact_score_3d", 0.0))
+    market_count = safe_float(row.get("market_news_count_3d", 0.0))
+    market_macro_count = safe_float(row.get("market_macro_event_count_3d", 0.0))
+
+    prob = 0.50
+    reasons = []
+
+    if news_count_3d == 0 and market_count == 0:
+        return 0.50, ["Recent news support is limited, so the context layer stays neutral"], "Low"
+
+    prob += np.clip(symbol_sent_3d * 0.18, -0.07, 0.07)
+    prob += np.clip(symbol_sent_7d * 0.12, -0.05, 0.05)
+    prob += np.clip(decayed_sent * 0.16, -0.06, 0.06)
+    prob += np.clip(symbol_impact * 0.12, -0.06, 0.06)
+    prob += np.clip(market_sent_3d * 0.15, -0.05, 0.05)
+    prob += np.clip(market_sent_7d * 0.10, -0.04, 0.04)
+    prob += np.clip(market_impact * 0.10, -0.04, 0.04)
+
+    prob += np.clip(high_impact_count * 0.02, 0.0, 0.06)
+    prob += np.clip(company_event_count * 0.015, 0.0, 0.04)
+    prob += np.clip(macro_event_count * 0.015, 0.0, 0.04)
+    prob += np.clip(market_macro_count * 0.01, 0.0, 0.03)
+
+    if symbol_impact > 0.08:
+        reasons.append("Recent asset-specific headlines appear meaningful enough to matter")
+    if symbol_sent_3d > 0.08 or decayed_sent > 0.08:
+        reasons.append("Recent asset-specific news tone is supportive")
+    elif symbol_sent_3d < -0.08 or decayed_sent < -0.08:
+        reasons.append("Recent asset-specific news tone is negative")
+
+    if market_sent_3d > 0.08:
+        reasons.append("Broader market news is supportive")
+    elif market_sent_3d < -0.08:
+        reasons.append("Broader market news is creating headwinds")
+
+    support = news_support_label(row)
+    return clip01(prob), reasons[:4], support
+
+
+def compute_risk_penalty(row: pd.Series) -> tuple[float, list[str]]:
     penalty = 0.0
     reasons = []
-    vol = float(row.get("volatility_30d_annualized", 0.0))
-    dd = float(row.get("drawdown_pct", 0.0))
-    rsi = float(row.get("rsi_14", 50.0))
-    rel30 = float(row.get("rel_return_30d_pct", 0.0))
-    rel90 = float(row.get("rel_return_90d_pct", 0.0))
+
+    vol = safe_float(row.get("volatility_30d_annualized", 0.0))
+    drawdown = safe_float(row.get("drawdown_pct", 0.0))
+    rsi = safe_float(row.get("rsi_14", 50.0))
+    rel30 = safe_float(row.get("rel_return_30d_pct", 0.0))
+    rel90 = safe_float(row.get("rel_return_90d_pct", 0.0))
 
     if vol >= 55:
-        penalty += 0.12
-        reasons.append("very high volatility")
-    elif vol >= 40:
-        penalty += 0.07
-        reasons.append("elevated volatility")
-
-    if dd <= -20:
         penalty += 0.10
-        reasons.append("deep drawdown")
-    elif dd <= -10:
-        penalty += 0.05
-        reasons.append("moderate drawdown")
+        reasons.append("Volatility is unusually high")
+    elif vol >= 40:
+        penalty += 0.06
+        reasons.append("Volatility is elevated")
+
+    if drawdown <= -20:
+        penalty += 0.08
+        reasons.append("The asset remains in a deep drawdown")
+    elif drawdown <= -10:
+        penalty += 0.04
+        reasons.append("The asset is still below prior highs")
 
     if rsi >= 75:
-        penalty += 0.04
-        reasons.append("overbought momentum risk")
+        penalty += 0.03
+        reasons.append("Momentum is stretched")
 
     if rel30 < -5:
-        penalty += 0.04
-        reasons.append("recent underperformance vs benchmark")
+        penalty += 0.03
+        reasons.append("Recent benchmark-relative performance is weak")
 
     if rel90 < -10:
-        penalty += 0.05
-        reasons.append("longer-term underperformance vs benchmark")
+        penalty += 0.04
+        reasons.append("Longer-term benchmark-relative performance is weak")
 
-    return penalty, reasons
+    return penalty, reasons[:5]
 
 
-def _recommendation_label(score: float) -> str:
-    if score >= 0.70:
+def compute_quality_score(wf_metrics: pd.DataFrame) -> tuple[float, str]:
+    if wf_metrics.empty or "f1" not in wf_metrics.columns:
+        return 0.50, "Limited validation"
+
+    best_f1 = float(wf_metrics["f1"].max())
+    if best_f1 >= 0.62:
+        return 0.85, "Strong validation"
+    if best_f1 >= 0.54:
+        return 0.65, "Acceptable validation"
+    if best_f1 >= 0.48:
+        return 0.50, "Mixed validation"
+    return 0.35, "Weak validation"
+
+
+def final_recommendation_label(score: float) -> str:
+    if score >= 0.68:
         return "STRONG BUY"
-    if score >= 0.60:
+    if score >= 0.58:
         return "BUY"
-    if score >= 0.52:
-        return "WATCH"
     if score >= 0.45:
+        return "WATCH"
+    if score >= 0.35:
         return "AVOID"
     return "STRONG AVOID"
 
 
-def explain_hybrid_contributions(latest_row: pd.Series, latest_preds: pd.DataFrame) -> pd.DataFrame:
-    prob_map = {row["model"]: float(row["latest_up_probability"]) for _, row in latest_preds.iterrows()} if not latest_preds.empty else {}
+def build_analyst_engine(latest_row: pd.Series, latest_preds: pd.DataFrame, wf_metrics: pd.DataFrame) -> dict:
+    technical_prob, technical_reasons = compute_technical_probability(latest_row)
+    model_prob, model_breakdown = compute_adaptive_model_probability(latest_preds, wf_metrics)
+    context_prob, context_reasons, news_support = compute_context_probability(latest_row)
+    risk_penalty, risk_reasons = compute_risk_penalty(latest_row)
+    quality_score, quality_label = compute_quality_score(wf_metrics)
 
-    signal_prob = _signal_to_probability(float(latest_row.get("signal_score", 0)))
-    news_prob = _news_to_probability(
-        float(latest_row.get("news_avg_sentiment", 0.0)),
-        float(latest_row.get("news_positive_ratio", 0.0)),
-        float(latest_row.get("news_negative_ratio", 0.0)),
+    probs = [technical_prob, model_prob]
+    if news_support != "Low":
+        probs.append(context_prob)
+
+    agreement = model_agreement_label(probs)
+
+    raw_score = (0.43 * technical_prob) + (0.42 * model_prob) + (0.15 * context_prob)
+    final_score = clip01(raw_score - (0.40 * risk_penalty))
+
+    technical_strength = abs(technical_prob - 0.5) * 2
+    model_strength = abs(model_prob - 0.5) * 2
+    agreement_score = {"High": 0.88, "Moderate": 0.68, "Low": 0.44}.get(agreement, 0.50)
+    support_bonus = {"High": 0.85, "Moderate": 0.65, "Low": 0.50}.get(news_support, 0.50)
+
+    confidence = (
+        0.28 * agreement_score
+        + 0.26 * quality_score
+        + 0.22 * technical_strength
+        + 0.16 * model_strength
+        + 0.08 * support_bonus
     )
+    confidence -= 0.18 * risk_penalty
+    if agreement == "Low":
+        confidence *= 0.85
+    confidence = clip01(confidence)
 
-    rows = [
-        {"component": "Rule Signal", "raw_value": signal_prob, "weight": ENSEMBLE_SIGNAL_WEIGHT, "weighted_contribution": signal_prob * ENSEMBLE_SIGNAL_WEIGHT},
-        {"component": "Logistic Regression", "raw_value": prob_map.get("Logistic Regression", 0.50), "weight": ENSEMBLE_LOGISTIC_WEIGHT, "weighted_contribution": prob_map.get("Logistic Regression", 0.50) * ENSEMBLE_LOGISTIC_WEIGHT},
-        {"component": "Neural Net (MLP)", "raw_value": prob_map.get("Neural Net (MLP)", 0.50), "weight": ENSEMBLE_MLP_WEIGHT, "weighted_contribution": prob_map.get("Neural Net (MLP)", 0.50) * ENSEMBLE_MLP_WEIGHT},
-        {"component": "Random Forest", "raw_value": prob_map.get("Random Forest", 0.50), "weight": ENSEMBLE_RF_WEIGHT, "weighted_contribution": prob_map.get("Random Forest", 0.50) * ENSEMBLE_RF_WEIGHT},
-        {"component": "Gradient Boosting", "raw_value": prob_map.get("Gradient Boosting", 0.50), "weight": ENSEMBLE_GB_WEIGHT, "weighted_contribution": prob_map.get("Gradient Boosting", 0.50) * ENSEMBLE_GB_WEIGHT},
-        {"component": "News", "raw_value": news_prob, "weight": ENSEMBLE_NEWS_WEIGHT, "weighted_contribution": news_prob * ENSEMBLE_NEWS_WEIGHT},
-    ]
-    return pd.DataFrame(rows).sort_values("weighted_contribution", ascending=False).reset_index(drop=True)
-
-
-def build_hybrid_recommendation(
-    latest_row: pd.Series,
-    latest_preds: pd.DataFrame,
-    wf_metrics: pd.DataFrame | None = None,
-) -> dict:
-    prob_map = {row["model"]: float(row["latest_up_probability"]) for _, row in latest_preds.iterrows()} if not latest_preds.empty else {}
-
-    logistic_prob = prob_map.get("Logistic Regression", 0.50)
-    mlp_prob = prob_map.get("Neural Net (MLP)", 0.50)
-    rf_prob = prob_map.get("Random Forest", 0.50)
-    gb_prob = prob_map.get("Gradient Boosting", 0.50)
-
-    signal_prob = _signal_to_probability(float(latest_row.get("signal_score", 0)))
-    news_prob = _news_to_probability(
-        float(latest_row.get("news_avg_sentiment", 0.0)),
-        float(latest_row.get("news_positive_ratio", 0.0)),
-        float(latest_row.get("news_negative_ratio", 0.0)),
-    )
-
-    base_score = (
-        ENSEMBLE_SIGNAL_WEIGHT * signal_prob +
-        ENSEMBLE_LOGISTIC_WEIGHT * logistic_prob +
-        ENSEMBLE_MLP_WEIGHT * mlp_prob +
-        ENSEMBLE_RF_WEIGHT * rf_prob +
-        ENSEMBLE_GB_WEIGHT * gb_prob +
-        ENSEMBLE_NEWS_WEIGHT * news_prob
-    )
-
-    penalty, penalty_reasons = _risk_penalty(latest_row)
-    final_score = _clip01(base_score - penalty)
-
-    model_probs = [logistic_prob, mlp_prob, rf_prob, gb_prob]
-    agreement_gap = max(model_probs) - min(model_probs)
-    model_agreement = "High" if agreement_gap <= 0.07 else ("Medium" if agreement_gap <= 0.15 else "Low")
+    recommendation = final_recommendation_label(final_score)
+    regime = detect_market_regime(latest_row)
 
     reasons = []
-    if float(latest_row.get("signal_score", 0)) >= 3:
-        reasons.append("rule-based signal is bullish")
-    elif float(latest_row.get("signal_score", 0)) <= -2:
-        reasons.append("rule-based signal is bearish")
+    reasons.extend(technical_reasons[:2])
+    reasons.extend(context_reasons[:2])
+    if agreement == "High":
+        reasons.append("Model outputs are broadly aligned")
+    elif agreement == "Low":
+        reasons.append("Model outputs are not tightly aligned")
+    reasons.extend(risk_reasons[:2])
 
-    if float(latest_row.get("rel_return_30d_pct", 0.0)) > 0:
-        reasons.append("asset is outperforming the benchmark over 30d")
-    elif float(latest_row.get("rel_return_30d_pct", 0.0)) < 0:
-        reasons.append("asset is underperforming the benchmark over 30d")
+    deduped = []
+    for reason in reasons:
+        if reason and reason not in deduped:
+            deduped.append(reason)
 
-    if logistic_prob >= 0.60:
-        reasons.append("logistic model is supportive")
-    if mlp_prob >= 0.60:
-        reasons.append("neural net model is supportive")
-    if rf_prob >= 0.60:
-        reasons.append("random forest is supportive")
-    if gb_prob >= 0.60:
-        reasons.append("gradient boosting is supportive")
-
-    if float(latest_row.get("news_avg_sentiment", 0.0)) >= 0.15:
-        reasons.append("recent news tone is positive")
-    elif float(latest_row.get("news_avg_sentiment", 0.0)) <= -0.15:
-        reasons.append("recent news tone is negative")
-
-    if float(latest_row.get("ma_spread_pct", 0.0)) > 0:
-        reasons.append("short-term trend is above medium-term trend")
-
-    if wf_metrics is not None and not wf_metrics.empty:
-        best_f1 = float(wf_metrics["f1"].max())
-        if best_f1 >= 0.55:
-            reasons.append("walk-forward model performance is acceptable")
-        else:
-            reasons.append("walk-forward model performance is modest")
-
-    reasons.extend(penalty_reasons)
-    if not reasons:
-        reasons.append("signals are mixed and conviction is limited")
+    component_table = pd.DataFrame(
+        [
+            {"component": "Technical Layer", "score": technical_prob, "comment": "Trend, momentum, relative performance"},
+            {"component": "Model Layer", "score": model_prob, "comment": "Adaptive weighting based on recent validation"},
+            {"component": "Context Layer", "score": context_prob, "comment": "Symbol news, macro news, event impact"},
+            {"component": "Risk Penalty", "score": risk_penalty, "comment": "Volatility, drawdown, overstretch"},
+            {"component": "Validation Quality", "score": quality_score, "comment": quality_label},
+        ]
+    )
 
     return {
-        "recommendation": _recommendation_label(final_score),
-        "confidence_score": final_score,
-        "base_score_before_risk": base_score,
-        "risk_penalty": penalty,
-        "model_agreement": model_agreement,
-        "logistic_up_probability": logistic_prob,
-        "mlp_up_probability": mlp_prob,
-        "rf_up_probability": rf_prob,
-        "gb_up_probability": gb_prob,
-        "signal_implied_probability": signal_prob,
-        "news_implied_probability": news_prob,
-        "reason_text": "; ".join(reasons[:8]) + ".",
+        "recommendation": recommendation,
+        "recommendation_score": final_score,
+        "confidence_score": confidence,
+        "confidence_band": confidence_band(confidence),
+        "technical_probability": technical_prob,
+        "model_probability": model_prob,
+        "context_probability": context_prob,
+        "model_agreement": agreement,
+        "news_support": news_support,
+        "quality_label": quality_label,
+        "risk_penalty": risk_penalty,
+        "risk_level": risk_level_from_penalty(risk_penalty),
+        "regime": regime,
+        "model_breakdown": model_breakdown,
+        "component_table": component_table,
+        "reasons": deduped[:6],
     }
+
+
+def build_analyst_memo(symbol: str, latest_row: pd.Series, analyst: dict) -> str:
+    trend_regime = analyst["regime"]["trend_regime"]
+    vol_regime = analyst["regime"]["vol_regime"]
+    strength_regime = analyst["regime"]["strength_regime"]
+
+    decision = analyst["recommendation"]
+    confidence = analyst["confidence_band"]
+    agreement = analyst["model_agreement"]
+    news_support = analyst["news_support"]
+    risk_level = analyst["risk_level"]
+
+    return (
+        f"For {symbol}, the engine currently assigns a {decision} view with {confidence.lower()} confidence. "
+        f"Technically, the asset is in a {trend_regime.lower()} environment with {vol_regime.lower()}, while relative performance remains "
+        f"{strength_regime.lower()}. Model agreement is {agreement.lower()}, which means the predictive layer is "
+        f"{'providing clear support' if agreement == 'High' else 'not fully aligned yet' if agreement == 'Moderate' else 'still mixed'}. "
+        f"News support is {news_support.lower()}, and the current risk backdrop is {risk_level.lower()}. "
+        f"Overall, this should be interpreted as a structured analyst-style recommendation rather than a guess."
+    )
