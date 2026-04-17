@@ -223,7 +223,6 @@ def _fetch_google_news_rows(query: str, max_items: int, symbol: str | None = Non
 
 def fetch_symbol_news(symbols: list[str], max_headlines_per_symbol: int = 35) -> pd.DataFrame:
     rows = []
-
     per_query = max(8, int(max_headlines_per_symbol / 2))
 
     for symbol in symbols:
