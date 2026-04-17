@@ -58,12 +58,12 @@ NEWS_SUMMARY_FILE = BASE_DIR / NEWS_SUMMARY_PATH
 PIPELINE_PATH = SRC_DIR / "pipeline.py"
 
 
-def info_label(label: str, info: str):
+def section_title(title: str, help_text: str):
     col1, col2 = st.columns([20, 1])
     with col1:
-        st.markdown(f"**{label}**")
+        st.markdown(f"### {title}")
     with col2:
-        st.markdown("ℹ️", help=info)
+        st.markdown("ℹ️", help=help_text)
 
 
 def confidence_band(score: float) -> str:
@@ -91,6 +91,36 @@ def news_support_label(row: pd.Series) -> str:
     if count_3d >= 1 or market_count >= 2:
         return "Moderate"
     return "Low"
+
+
+def clean_reason_lines(reason_text: str) -> list[str]:
+    if not isinstance(reason_text, str) or not reason_text.strip():
+        return ["Signals are mixed and conviction is limited."]
+    parts = [p.strip().capitalize() for p in reason_text.replace(".", "").split(";") if p.strip()]
+    return parts[:8] if parts else ["Signals are mixed and conviction is limited."]
+
+
+def card_html(label: str, value: str, subtitle: str | None = None) -> str:
+    subtitle_html = f"<div style='font-size:0.85rem;color:#666;margin-top:0.35rem;'>{subtitle}</div>" if subtitle else ""
+    return f"""
+    <div style="
+        border:1px solid #e6e6e6;
+        border-radius:16px;
+        padding:18px 18px 14px 18px;
+        background:#ffffff;
+        min-height:120px;
+    ">
+        <div style="font-size:0.95rem;color:#555;margin-bottom:0.75rem;">{label}</div>
+        <div style="
+            font-size:2.2rem;
+            line-height:1.15;
+            font-weight:700;
+            word-break:break-word;
+            overflow-wrap:anywhere;
+        ">{value}</div>
+        {subtitle_html}
+    </div>
+    """
 
 
 def run_pipeline() -> tuple[bool, str]:
@@ -154,15 +184,10 @@ def build_summary_table(df: pd.DataFrame) -> pd.DataFrame:
         "rsi_14",
         "ma_spread_pct",
         "trend_regime",
-        "rsi_status",
-        "volatility_status",
-        "signal_score",
-        "signal_strength",
         "signal",
+        "signal_score",
         "news_headline_count",
         "news_avg_sentiment",
-        "news_positive_ratio",
-        "news_negative_ratio",
         "news_count_3d",
         "news_impact_score_3d",
         "market_news_sentiment_3d",
@@ -402,8 +427,7 @@ try:
 except Exception as e:
     hybrid_error = str(e)
 
-# Final Recommendation Section
-info_label(
+section_title(
     "Final Recommendation",
     "This is the main decision output. It combines technical structure, machine learning, recent news context, and risk penalties.",
 )
@@ -416,32 +440,57 @@ if hybrid_card is not None:
     risk_text = risk_level(float(hybrid_card["risk_penalty"]))
     news_support = news_support_label(latest_row)
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Decision", hybrid_card["recommendation"])
-    c2.metric("Confidence", f'{hybrid_card["confidence_score"]:.2f}', help=confidence_text)
-    c3.metric("Model Agreement", hybrid_card["model_agreement"])
-    c4.metric("Risk Level", risk_text)
-    c5.metric("News Support", news_support)
+    card1, card2, card3, card4, card5 = st.columns(5)
 
-    st.success(hybrid_card["reason_text"])
+    with card1:
+        st.markdown(
+            card_html("Decision", hybrid_card["recommendation"]),
+            unsafe_allow_html=True,
+        )
+    with card2:
+        st.markdown(
+            card_html("Confidence", f'{hybrid_card["confidence_score"]:.2f}', confidence_text),
+            unsafe_allow_html=True,
+        )
+    with card3:
+        st.markdown(
+            card_html("Model Agreement", hybrid_card["model_agreement"]),
+            unsafe_allow_html=True,
+        )
+    with card4:
+        st.markdown(
+            card_html("Risk Level", risk_text),
+            unsafe_allow_html=True,
+        )
+    with card5:
+        st.markdown(
+            card_html("News Support", news_support),
+            unsafe_allow_html=True,
+        )
+
+    section_title(
+        "Why this decision?",
+        "These are the main reasons driving the current recommendation. They summarize technical structure, model support, news context, and risk concerns.",
+    )
+
+    reason_lines = clean_reason_lines(hybrid_card["reason_text"])
+    for reason in reason_lines:
+        st.markdown(f"- {reason}")
 
     if not contrib_df.empty:
-        info_label(
-            "Why this decision?",
-            "These components show which parts of the system contributed most to the final recommendation.",
-        )
-        display_cols = ["component", "raw_value", "weighted_contribution"]
-        st.dataframe(contrib_df[display_cols], use_container_width=True)
+        with st.expander("Decision components", expanded=False):
+            st.dataframe(
+                contrib_df[["component", "raw_value", "weighted_contribution"]],
+                use_container_width=True,
+            )
 
-# Market Summary
-info_label(
+section_title(
     "Market Summary",
     "This table ranks the latest state of each asset using recent trend, momentum, risk, and news context.",
 )
 st.dataframe(summary_table, use_container_width=True)
 
 tabs = st.tabs(["Overview", "News & Context", "Strategy", "Portfolio", "Advanced"])
-
 overview_tab, news_tab, strategy_tab, portfolio_tab, advanced_tab = tabs
 
 with overview_tab:
@@ -476,12 +525,13 @@ with news_tab:
     symbol_news_summary = news_summary[news_summary["symbol"] == selected_symbol].copy() if not news_summary.empty else pd.DataFrame()
     symbol_news = news_headlines[news_headlines["symbol"] == selected_symbol].copy() if not news_headlines.empty else pd.DataFrame()
 
+    section_title(
+        "News Context",
+        "This section shows whether recent headlines are supportive, negative, or limited. It helps explain whether the recommendation has news support or relies mostly on technical and model signals.",
+    )
+
     row_left, row_right = st.columns(2)
     with row_left:
-        info_label(
-            "News Context",
-            "This section shows whether recent headlines are supportive, negative, or limited. It helps explain whether the recommendation has news support or relies mostly on technical and model signals.",
-        )
         if not symbol_news_summary.empty:
             row = symbol_news_summary.iloc[0]
             n1, n2, n3, n4 = st.columns(4)
@@ -514,7 +564,7 @@ with news_tab:
             )
 
     if not symbol_news.empty:
-        info_label(
+        section_title(
             "Recent Headlines",
             "These are the latest headlines used as part of the news context layer. They help explain whether the system is reacting to supportive, neutral, or negative information.",
         )
@@ -526,7 +576,7 @@ with news_tab:
         st.info("No recent headlines were captured for this symbol.")
 
 with strategy_tab:
-    info_label(
+    section_title(
         "Strategy Validation",
         "This section shows how the system behaves when translated into trading rules. It is not a guarantee of future performance, but it helps validate consistency and realism.",
     )
@@ -566,7 +616,7 @@ with strategy_tab:
         st.info(f"Walk-forward validation unavailable: {wf_error}")
 
 with portfolio_tab:
-    info_label(
+    section_title(
         "Portfolio Analytics",
         "This section compares different allocation styles so the user can evaluate not only one asset, but also how multiple assets behave together in a portfolio.",
     )
@@ -642,7 +692,7 @@ with portfolio_tab:
             st.warning(f"Portfolio analysis unavailable: {e}")
 
 with advanced_tab:
-    info_label(
+    section_title(
         "Advanced Validation",
         "This area is for deeper inspection of model quality, feature influence, raw outputs, and research diagnostics.",
     )
