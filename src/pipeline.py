@@ -103,25 +103,7 @@ def add_news_data(clean: pd.DataFrame, symbols: list[str]) -> pd.DataFrame:
         return merge_news_features_into_market(clean, news_daily)
 
     except Exception as exc:
-        print(f"News fetch failed: {exc}")
-        clean = clean.copy()
-        clean["news_headline_count"] = 0
-        clean["news_avg_sentiment"] = 0.0
-        clean["news_positive_ratio"] = 0.0
-        clean["news_negative_ratio"] = 0.0
-        clean["news_latest_sentiment"] = 0.0
-        clean["news_has_any"] = 0
-        clean["news_sentiment_3d"] = 0.0
-        clean["news_sentiment_7d"] = 0.0
-        clean["news_count_3d"] = 0
-        clean["news_count_7d"] = 0
-        clean["news_impact_score_3d"] = 0.0
-        clean["news_decayed_sentiment_7d"] = 0.0
-        clean["market_news_sentiment_3d"] = 0.0
-        clean["market_news_sentiment_7d"] = 0.0
-        clean["market_news_impact_score_3d"] = 0.0
-        clean["market_news_count_3d"] = 0
-        return clean
+         raise RuntimeError(f"NEWS PIPELINE FAILED: {exc}")
 
 def main() -> None:
     ensure_dirs()

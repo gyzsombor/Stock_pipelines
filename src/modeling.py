@@ -25,12 +25,21 @@ from config import (
     MIN_MODEL_ROWS,
     MODEL_BACKTEST_EXPORT_PATH,
     MODEL_FEATURES,
+    PREDICTION_HORIZON_DAYS,
     PREDICTIONS_EXPORT_PATH,
+    TARGET_RETURN_THRESHOLD,
     TRADING_DAYS_PER_YEAR,
     WALK_FORWARD_TEST_WINDOW,
     WALK_FORWARD_TRAIN_WINDOW,
 )
 
+model_error = None
+wf_error = None
+
+try:
+    model_metrics, latest_preds, coef_df = run_symbol_models(...)
+except Exception as e:
+    model_error = str(e)
 
 def _prepare_symbol_model_data(df: pd.DataFrame, symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     subset = df[df["symbol"] == symbol].sort_values("date").copy()
@@ -38,11 +47,20 @@ def _prepare_symbol_model_data(df: pd.DataFrame, symbol: str) -> tuple[pd.DataFr
     if subset.empty:
         raise ValueError(f"No data found for symbol: {symbol}")
 
-    subset["target_next_day_up"] = (subset["close"].shift(-1) > subset["close"]).astype(float)
-    subset["target_next_day_return_decimal"] = (subset["close"].shift(-1) / subset["close"]) - 1.0
+    subset["target_forward_return_decimal"] = (
+        subset["close"].shift(-PREDICTION_HORIZON_DAYS) / subset["close"]
+    ) - 1.0
+
+    subset["target_up_move"] = (
+        subset["target_forward_return_decimal"] > TARGET_RETURN_THRESHOLD
+    ).astype(float)
 
     subset = subset.dropna(subset=MODEL_FEATURES).copy()
-    labeled = subset.dropna(subset=["target_next_day_up", "target_next_day_return_decimal"]).copy()
+
+    # Keep modeling focused on the recent window where news features are actually meaningful
+    subset = subset.tail(120).copy()
+
+    labeled = subset.dropna(subset=["target_up_move", "target_forward_return_decimal"]).copy()
 
     if len(labeled) < MIN_MODEL_ROWS:
         raise ValueError(
@@ -227,9 +245,9 @@ def _train_tuned_models(train_df: pd.DataFrame):
     subtrain, valid = _train_valid_split(train_df, valid_fraction=0.2)
 
     X_subtrain = subtrain[MODEL_FEATURES]
-    y_subtrain = subtrain["target_next_day_up"].astype(int)
+    y_subtrain = subtrain["target_up_move"].astype(int)
     X_valid = valid[MODEL_FEATURES]
-    y_valid = valid["target_next_day_up"].astype(int)
+    y_valid = valid["target_up_move"].astype(int)
 
     results = []
 
@@ -239,7 +257,7 @@ def _train_tuned_models(train_df: pd.DataFrame):
     _, gb_cfg, gb_f1 = _tune_gb(X_subtrain, y_subtrain, X_valid, y_valid)
 
     X_full = train_df[MODEL_FEATURES]
-    y_full = train_df["target_next_day_up"].astype(int)
+    y_full = train_df["target_up_move"].astype(int)
 
     models = {
         "Logistic Regression": _make_logistic_model(log_cfg["C"], log_cfg["class_weight"]),
@@ -266,7 +284,7 @@ def run_symbol_models(df: pd.DataFrame, symbol: str) -> tuple[pd.DataFrame, pd.D
     train, test = _chronological_split(labeled, test_fraction=0.2)
 
     X_test = test[MODEL_FEATURES]
-    y_test = test["target_next_day_up"].astype(int)
+    y_test = test["target_up_move"].astype(int)
 
     models, tuning_info = _train_tuned_models(train)
 
@@ -354,17 +372,32 @@ def run_walk_forward_models(
 
         models, tuning_info = _train_tuned_models(train_slice)
         X_test = test_slice[MODEL_FEATURES]
-        y_test = test_slice["target_next_day_up"].astype(int)
+        y_test = test_slice["target_up_move"].astype(int)
 
         for model_name, model in models.items():
             probs = model.predict_proba(X_test)[:, 1]
             preds = (probs >= prob_threshold).astype(int)
 
             temp = test_slice[[
-                "date", "symbol", "close", "signal_score", "volatility_30d_annualized",
-                "drawdown_pct", "news_headline_count", "news_avg_sentiment",
-                "news_positive_ratio", "news_negative_ratio",
-                "target_next_day_up", "target_next_day_return_decimal"
+                "date",
+                "symbol",
+                "close",
+                "signal_score",
+                "volatility_30d_annualized",
+                "drawdown_pct",
+                "news_headline_count",
+                "news_avg_sentiment",
+                "news_positive_ratio",
+                "news_negative_ratio",
+                "news_sentiment_3d",
+                "news_sentiment_7d",
+                "news_impact_score_3d",
+                "news_decayed_sentiment_7d",
+                "market_news_sentiment_3d",
+                "market_news_sentiment_7d",
+                "market_news_impact_score_3d",
+                "target_up_move",
+                "target_forward_return_decimal",
             ]].copy()
 
             temp["model"] = model_name
@@ -373,10 +406,10 @@ def run_walk_forward_models(
             temp["actual_class"] = y_test.values
             temp["strategy_return_decimal"] = np.where(
                 temp["predicted_up_probability"] >= prob_threshold,
-                temp["target_next_day_return_decimal"],
+                temp["target_forward_return_decimal"],
                 0.0,
             )
-            temp["buyhold_return_decimal"] = temp["target_next_day_return_decimal"]
+            temp["buyhold_return_decimal"] = temp["target_forward_return_decimal"]
             temp["trade_flag"] = (temp["predicted_up_probability"] >= prob_threshold).astype(int)
 
             prediction_rows.append(temp)
