@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 import subprocess
 import sys
 
@@ -28,8 +28,8 @@ SRC_DIR = BASE_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from src.backtest import run_hybrid_recommendation_backtest, run_portfolio_backtest, run_symbol_backtest
-from src.config import (
+from backtest import run_hybrid_recommendation_backtest, run_portfolio_backtest, run_symbol_backtest
+from config import (
     APP_TITLE,
     BENCHMARK_SYMBOL,
     DEFAULT_PROB_THRESHOLD,
@@ -44,16 +44,14 @@ from src.config import (
     ROLLING_OPT_HOLD_WINDOW,
     ROLLING_OPT_TRAIN_WINDOW,
 )
-from src.llm_explainer import generate_analyst_memo_llm
-from src.modeling import (
+from llm_explainer import generate_analyst_memo_llm
+from modeling import (
     build_analyst_engine,
-    confidence_band,
     export_walk_forward_outputs,
-    risk_level_from_penalty,
     run_symbol_models,
     run_walk_forward_models,
 )
-from src.portfolio import equal_weight_weights, max_sharpe_like_weights, min_vol_weights, rolling_optimized_portfolio
+from portfolio import equal_weight_weights, max_sharpe_like_weights, min_vol_weights
 
 DATA_PATH = BASE_DIR / OUTPUT_CSV_PATH
 NEWS_HEADLINES_FILE = BASE_DIR / NEWS_HEADLINES_PATH
@@ -467,7 +465,6 @@ if analyst is not None:
         "This is the professional-language explanation layer. It turns model outputs, technical structure, and news context into readable analyst-style guidance.",
     )
     st.markdown(f"<div class='memo-box'>{llm_note['memo']}</div>", unsafe_allow_html=True)
-    st.caption(f"Memo mode: {llm_note.get('mode', 'unknown')}")
 
     section_title(
         "Key Reasons",
