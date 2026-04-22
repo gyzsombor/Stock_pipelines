@@ -264,7 +264,7 @@ def build_recommendation_history(symbol_df: pd.DataFrame, latest_preds: pd.DataF
     rows = []
 
     for _, row in recent.iterrows():
-        analyst = build_analyst_engine(row, latest_preds, wf_metrics)
+        analyst = build_analyst_engine(row, latest_preds, wf_metrics, calibration_model)
         rows.append(
             {
                 "date": row["date"],
@@ -419,22 +419,30 @@ try:
 except Exception as e:
     model_error = str(e)
 
-try:
-    wf_predictions, wf_metrics, wf_backtest = run_walk_forward_models(
-        filtered_data,
-        selected_symbol,
-        train_window=int(train_window),
-        test_window=int(test_window),
-        prob_threshold=float(prob_threshold),
-    )
-except Exception as e:
-    wf_error = str(e)
+calibration_model = None
+
+# Check if data has all required features before walk-forward
+from config import MODEL_FEATURES
+missing_features = [f for f in MODEL_FEATURES if f not in filtered_data.columns]
+if missing_features:
+    wf_error = f"Data is stale, missing features: {missing_features}. Please click 'Run / Refresh Pipeline' to update."
+else:
+    try:
+        wf_predictions, wf_metrics, wf_backtest, calibration_model = run_walk_forward_models(
+            filtered_data,
+            selected_symbol,
+            train_window=int(train_window),
+            test_window=int(test_window),
+            prob_threshold=float(prob_threshold),
+        )
+    except Exception as e:
+        wf_error = str(e)
 
 analyst_error = None
 analyst = None
 
 try:
-    analyst = build_analyst_engine(latest_row, latest_preds, wf_metrics)
+    analyst = build_analyst_engine(latest_row, latest_preds, wf_metrics, calibration_model)
 except Exception as e:
     analyst_error = str(e)
 
@@ -449,7 +457,7 @@ if analyst_error is not None:
 if analyst is not None:
     llm_note = generate_analyst_memo_llm(selected_symbol, latest_row, analyst)
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     with c1:
         st.markdown(card_html("Decision", analyst["recommendation"]), unsafe_allow_html=True)
     with c2:
@@ -460,6 +468,8 @@ if analyst is not None:
         st.markdown(card_html("Risk Level", analyst["risk_level"]), unsafe_allow_html=True)
     with c5:
         st.markdown(card_html("News Support", analyst["news_support"]), unsafe_allow_html=True)
+    with c6:
+        st.markdown(card_html("Position Size", f'{analyst["recommended_position_size"]:.2f}'), unsafe_allow_html=True)
 
     section_title(
         "Analyst Memo",
@@ -735,6 +745,15 @@ with advanced_tab:
         st.warning(f"Model metrics unavailable: {model_error}")
     if wf_error is not None:
         st.warning(f"Walk-forward metrics unavailable: {wf_error}")
+
+    # Calibration diagnostics
+    if not wf_metrics.empty and "brier_score" in wf_metrics.columns:
+        st.markdown("**Calibration Diagnostics**")
+        best_brier = wf_metrics["brier_score"].min()
+        st.metric("Best Brier Score", f"{best_brier:.3f}")
+        if analyst_error is None:
+            st.metric("Raw Confidence", f'{analyst.get("raw_confidence", "N/A"):.2f}')
+            st.metric("Calibrated Confidence", f'{analyst.get("calibrated_confidence", "N/A"):.2f}')
 
     a1, a2 = st.columns(2)
 

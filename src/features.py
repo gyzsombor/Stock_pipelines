@@ -59,8 +59,11 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     benchmark["spy_return_5d"] = benchmark["close"].pct_change(5)
     benchmark["spy_return_20d"] = benchmark["close"].pct_change(20)
     benchmark["spy_volatility_20d"] = benchmark["spy_return_1d"].rolling(20).std()
+    benchmark["spy_ma_20"] = benchmark["close"].rolling(20).mean()
+    benchmark["spy_ma_50"] = benchmark["close"].rolling(50).mean()
+    benchmark["spy_trend_strength_20_50"] = _safe_divide(benchmark["spy_ma_20"] - benchmark["spy_ma_50"], benchmark["spy_ma_50"]) * 100
     benchmark = benchmark[
-        ["date", "spy_return_1d", "spy_return_5d", "spy_return_20d", "spy_volatility_20d"]
+        ["date", "spy_return_1d", "spy_return_5d", "spy_return_20d", "spy_volatility_20d", "spy_ma_20", "spy_ma_50", "spy_trend_strength_20_50"]
     ]
 
     pieces = []
@@ -121,6 +124,9 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
     featured = pd.concat(pieces, ignore_index=True).sort_values(["symbol", "date"]).reset_index(drop=True)
     featured = _add_regime_flags(featured)
+
+    # Fill missing SPY trend strength with 0 to prevent dropna issues
+    featured["spy_trend_strength_20_50"] = featured["spy_trend_strength_20_50"].fillna(0.0)
 
     # backward compatibility
     featured["volatility_30d_annualized"] = featured["volatility_20d_annualized"]

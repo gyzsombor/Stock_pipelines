@@ -7,8 +7,9 @@ import pandas as pd
 
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.impute import SimpleImputer
+from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from sklearn.metrics import accuracy_score, brier_score_loss, f1_score, precision_score, recall_score
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -381,6 +382,30 @@ def _strategy_metrics(returns: pd.Series) -> dict:
     }
 
 
+def _fit_calibration_model(predictions_df: pd.DataFrame) -> IsotonicRegression:
+    """
+    Fit isotonic regression for probability calibration using walk-forward predictions.
+    """
+    if predictions_df.empty or "predicted_up_probability" not in predictions_df.columns or "actual_class" not in predictions_df.columns:
+        # Return identity calibration if no data
+        iso = IsotonicRegression(out_of_bounds="clip")
+        iso.fit([0.0, 1.0], [0.0, 1.0])
+        return iso
+    
+    # Use ensemble predictions (average across models for each date)
+    ensemble_preds = predictions_df.groupby("date").agg({
+        "predicted_up_probability": "mean",
+        "actual_class": "first"  # Assuming same actual for all models
+    }).reset_index()
+    
+    y_prob = ensemble_preds["predicted_up_probability"].values
+    y_true = ensemble_preds["actual_class"].values
+    
+    iso = IsotonicRegression(out_of_bounds="clip")
+    iso.fit(y_prob, y_true)
+    return iso
+
+
 def run_walk_forward_models(
     df: pd.DataFrame,
     symbol: str,
@@ -475,6 +500,7 @@ def run_walk_forward_models(
                 "precision": precision_score(y_true, y_pred, zero_division=0),
                 "recall": recall_score(y_true, y_pred, zero_division=0),
                 "f1": f1_score(y_true, y_pred, zero_division=0),
+                "brier_score": brier_score_loss(y_true, group["predicted_up_probability"]),
                 "avg_predicted_up_probability": float(group["predicted_up_probability"].mean()),
                 "avg_position_size": float(group["position_size"].mean()),
                 "trade_rate_pct": float(group["trade_flag"].mean() * 100.0),
@@ -496,7 +522,10 @@ def run_walk_forward_models(
     metrics_df = pd.DataFrame(metric_rows).sort_values("f1", ascending=False).reset_index(drop=True)
     backtest_df = pd.DataFrame(backtest_rows).reset_index(drop=True)
 
-    return predictions, metrics_df, backtest_df
+    # Fit calibration model using walk-forward predictions
+    calibration_model = _fit_calibration_model(predictions)
+
+    return predictions, metrics_df, backtest_df, calibration_model
 
 
 def export_walk_forward_outputs(
@@ -776,14 +805,13 @@ def final_recommendation_label(score: float) -> str:
     return "STRONG AVOID"
 
 
-def build_analyst_engine(latest_row: pd.Series, latest_preds: pd.DataFrame, wf_metrics: pd.DataFrame) -> dict:
+def build_analyst_engine(latest_row: pd.Series, latest_preds: pd.DataFrame, wf_metrics: pd.DataFrame, calibration_model: IsotonicRegression | None = None) -> dict:
     # -------------------------
     # Live ensemble weights
     # -------------------------
     weights = {
         "Gradient Boosting": 1.5,
         "Random Forest": 1.1,
-        "Logistic Regression": 0.4,
     }
 
     model_outputs = {}
@@ -862,12 +890,21 @@ def build_analyst_engine(latest_row: pd.Series, latest_preds: pd.DataFrame, wf_m
     # -------------------------
     # Confidence
     # -------------------------
-    confidence = (
+    raw_confidence = (
         0.6 * abs(score) +
         0.25 * agreement +
         0.15 * (1 - risk_penalty)
     )
-    confidence = min(float(confidence), 0.85)
+    raw_confidence = min(float(raw_confidence), 0.85)
+
+    # Apply calibration if available
+    if calibration_model is not None:
+        calibrated_confidence = float(calibration_model.predict([raw_confidence])[0])
+        calibrated_confidence = clip01(calibrated_confidence)  # Ensure [0,1]
+    else:
+        calibrated_confidence = raw_confidence
+
+    confidence = calibrated_confidence  # Use calibrated for display
 
     if confidence >= 0.72:
         confidence_band = "High"
@@ -875,6 +912,23 @@ def build_analyst_engine(latest_row: pd.Series, latest_preds: pd.DataFrame, wf_m
         confidence_band = "Moderate"
     else:
         confidence_band = "Low"
+
+    # -------------------------
+    # Dynamic Position Sizing
+    # Scales position size with calibrated confidence and reduces for risk
+    # Formula: direction * calibrated_confidence * (1 - risk_penalty), bounded [-0.4, 0.4]
+    # -------------------------
+    if decision in ["BUY", "WEAK BUY"]:
+        direction = 1.0
+    elif decision in ["AVOID", "WEAK AVOID"]:
+        direction = -1.0
+    else:
+        direction = 0.0
+
+    # Conservative sizing: calibrated confidence drives size, risk penalty reduces it
+    base_size = calibrated_confidence * direction
+    risk_adjusted_size = base_size * (1 - risk_penalty)
+    recommended_position_size = float(np.clip(risk_adjusted_size, -0.4, 0.4))  # Conservative bounds
 
     # -------------------------
     # Validation quality
@@ -972,6 +1026,9 @@ def build_analyst_engine(latest_row: pd.Series, latest_preds: pd.DataFrame, wf_m
         "recommendation": decision,
         "recommendation_score": float(ensemble_prob),
         "confidence_score": float(confidence),
+        "raw_confidence": float(raw_confidence),
+        "calibrated_confidence": float(calibrated_confidence),
+        "recommended_position_size": recommended_position_size,
         "confidence_band": confidence_band,
         "technical_probability": float(0.5 + 0.5 * score),
         "model_probability": float(ensemble_prob),

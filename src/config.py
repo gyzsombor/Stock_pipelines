@@ -77,6 +77,7 @@ MODEL_FEATURES = [
     "asset_vs_spy_20d",
     "beta_like_20d",
     "corr_to_spy_20d",
+    "spy_trend_strength_20_50",
 
     # symbol / asset class helpers
     "is_equity",
