@@ -270,6 +270,7 @@ def build_recommendation_history(symbol_df: pd.DataFrame, latest_preds: pd.DataF
                 "date": row["date"],
                 "symbol": row["symbol"],
                 "recommendation": analyst["recommendation"],
+                "recommendation_score": analyst["recommendation_score"],
                 "confidence_score": analyst["confidence_score"],
                 "risk_penalty": analyst["risk_penalty"],
                 "model_agreement": analyst["model_agreement"],

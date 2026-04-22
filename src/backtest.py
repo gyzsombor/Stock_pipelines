@@ -177,33 +177,111 @@ def run_portfolio_backtest(
 
 
 def run_hybrid_recommendation_backtest(
-    df: pd.DataFrame,
+    symbol_df: pd.DataFrame,
     recommendation_history: pd.DataFrame,
     transaction_cost_bps: float = 0.0,
     slippage_bps: float = 0.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    import numpy as np
+    import pandas as pd
+
+    if symbol_df.empty:
+        raise ValueError("symbol_df is empty.")
+
     if recommendation_history.empty:
-        raise ValueError("Recommendation history is empty.")
+        raise ValueError("recommendation_history is empty.")
 
-    merged = recommendation_history.merge(
-        df[["date", "symbol", "daily_return_decimal"]].copy(),
-        on=["date", "symbol"],
-        how="left",
-    ).sort_values("date").copy()
+    df = symbol_df.copy()
+    rec = recommendation_history.copy()
 
-    mapping = {
-        "STRONG BUY": 1.0,
-        "BUY": 1.0,
-        "WATCH": 0.0,
-        "AVOID": 0.0,
-        "STRONG AVOID": 0.0,
-    }
-    merged["position_raw"] = merged["recommendation"].map(mapping).fillna(0.0)
-    merged["position"] = merged["position_raw"].shift(1).fillna(0.0)
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    rec["date"] = pd.to_datetime(rec["date"], errors="coerce")
 
-    gross = merged["position"] * merged["daily_return_decimal"].fillna(0.0)
-    merged["strategy_return_decimal"] = _apply_costs(gross, merged["position"], transaction_cost_bps, slippage_bps)
-    merged["strategy_equity"] = (1.0 + merged["strategy_return_decimal"]).cumprod()
+    df = df.sort_values("date").reset_index(drop=True)
+    rec = rec.sort_values("date").reset_index(drop=True)
 
-    metrics = pd.DataFrame([{ "strategy": "Hybrid Recommendation Strategy", **_metrics_from_returns(merged["strategy_return_decimal"]) }])
-    return merged, metrics
+    merged = df.merge(
+        rec[["date", "recommendation", "recommendation_score", "confidence_score"]],
+        on="date",
+        how="inner",
+    ).copy()
+
+    if merged.empty:
+        raise ValueError("No overlapping dates between symbol_df and recommendation_history.")
+
+    # Forward one-day realized return
+    if "daily_return_decimal" in merged.columns:
+        merged["forward_return_decimal"] = merged["daily_return_decimal"].shift(-1)
+    else:
+        merged["forward_return_decimal"] = merged["close"].pct_change().shift(-1)
+
+    merged = merged.dropna(subset=["forward_return_decimal"]).copy()
+
+   
+    raw_score = merged["recommendation_score"].copy()
+
+# Convert to signed score in [-1, 1]
+    if raw_score.min() < 0:
+        signed_score = raw_score.clip(-1.0, 1.0)
+    else:
+        signed_score = ((raw_score - 0.5) * 2.0).clip(-1.0, 1.0)
+
+    # Confidence scaling
+    confidence_scaled = merged["confidence_score"].clip(lower=0.20, upper=0.85)
+
+    # Dead zone so tiny signals do nothing
+    dead_zone = 0.05
+    signed_edge = np.where(np.abs(signed_score) <= dead_zone, 0.0, signed_score)
+
+    # Long/short hybrid position sizing
+    merged["position_size"] = (signed_edge * confidence_scaled).clip(-1.0, 1.0)
+
+    total_cost_decimal = (transaction_cost_bps + slippage_bps) / 10000.0
+    merged["prev_position_size"] = merged["position_size"].shift(1).fillna(0.0)
+    merged["turnover"] = (merged["position_size"] - merged["prev_position_size"]).abs()
+    merged["cost_decimal"] = merged["turnover"] * total_cost_decimal
+
+    merged["strategy_return_decimal"] = (
+        merged["position_size"] * merged["forward_return_decimal"]
+        - merged["cost_decimal"]
+    )
+
+    merged["buyhold_return_decimal"] = merged["forward_return_decimal"]
+
+    merged["strategy_equity"] = (1.0 + merged["strategy_return_decimal"].fillna(0.0)).cumprod()
+    merged["buyhold_equity"] = (1.0 + merged["buyhold_return_decimal"].fillna(0.0)).cumprod()
+
+    def _max_drawdown(series: pd.Series) -> float:
+        running_peak = series.cummax()
+        drawdown = (series / running_peak) - 1.0
+        return float(drawdown.min() * 100.0)
+
+    def _metrics(returns: pd.Series, name: str) -> dict:
+        returns = returns.fillna(0.0)
+        total_return = (1.0 + returns).prod() - 1.0
+        annualized_return = (1.0 + total_return) ** (252 / max(len(returns), 1)) - 1.0
+        annualized_vol = returns.std() * np.sqrt(252)
+        sharpe_like = annualized_return / annualized_vol if annualized_vol and not np.isnan(annualized_vol) else np.nan
+        win_rate = float((returns > 0).sum() / max(((returns > 0) | (returns < 0)).sum(), 1))
+
+        equity = (1.0 + returns).cumprod()
+
+        return {
+            "strategy": name,
+            "total_return_pct": total_return * 100.0,
+            "annualized_return_pct": annualized_return * 100.0,
+            "annualized_vol_pct": annualized_vol * 100.0,
+            "sharpe_like": sharpe_like,
+            "max_drawdown_pct": _max_drawdown(equity),
+            "win_rate_pct": win_rate * 100.0,
+            "days": int(len(returns)),
+        }
+
+    metrics_df = pd.DataFrame(
+        [
+            _metrics(merged["strategy_return_decimal"], "Hybrid Recommendation Strategy"),
+            _metrics(merged["buyhold_return_decimal"], "Buy & Hold"),
+        ]
+    )
+
+    return merged, metrics_df

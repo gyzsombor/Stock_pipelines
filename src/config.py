@@ -18,27 +18,77 @@ REFRESH_AFTER_HOURS = 8
 MAX_COMPARE_DEFAULT = 3
 APP_TITLE = "AI-Assisted Market Analyst Engine"
 
+# -----------------------------
+# Asset class mapping
+# -----------------------------
+ASSET_CLASS_MAP = {
+    "AAPL": "equity",
+    "MSFT": "equity",
+    "TSLA": "equity",
+    "SPY": "fund",
+    "BTC-USD": "crypto",
+    "GC=F": "commodity",
+    "SI=F": "commodity",
+}
+
+ASSET_CLASS_TARGET_FLOOR = {
+    "equity": 0.0075,
+    "fund": 0.0050,
+    "commodity": 0.0075,
+    "crypto": 0.0150,
+    "unknown": 0.0100,
+}
+
+VOL_TARGET_MULTIPLIER = 0.60
+PREDICTION_HORIZON_DAYS = 5
+
+# -----------------------------
+# V2 feature set
+# -----------------------------
 MODEL_FEATURES = [
-    "ma_spread_pct",
-    "rel_return_30d_pct",
-    "rel_return_90d_pct",
-    "return_7d_pct",
-    "return_30d_pct",
-    "return_90d_pct",
-    "volatility_30d_annualized",
-    "rsi_14",
+    # price / momentum
     "daily_return_pct",
-    "volume_z_30",
+    "return_3d_pct",
+    "return_5d_pct",
+    "return_10d_pct",
+    "return_20d_pct",
+    "ma_spread_pct",
+    "trend_strength_20_50",
+    "rsi_14",
     "drawdown_pct",
-    "rolling_risk_adjusted_30",
+    "volume_z_30",
+
+    # volatility / regime
+    "volatility_10d_annualized",
+    "volatility_20d_annualized",
+    "volatility_ratio_10_20",
+    "market_regime_bull",
+    "market_regime_bear",
+    "market_regime_sideways",
+    "vol_regime_high",
+    "vol_regime_normal",
+
+    # benchmark / market context
+    "spy_return_1d",
+    "spy_return_5d",
+    "spy_return_20d",
+    "asset_vs_spy_1d",
+    "asset_vs_spy_5d",
+    "asset_vs_spy_20d",
+    "beta_like_20d",
+    "corr_to_spy_20d",
+
+    # symbol / asset class helpers
+    "is_equity",
+    "is_fund",
+    "is_crypto",
+    "is_commodity",
+
+    # news / context
     "news_headline_count",
     "news_avg_sentiment",
-    "news_positive_ratio",
-    "news_negative_ratio",
     "news_sentiment_3d",
     "news_sentiment_7d",
-    "news_count_3d",
-    "news_count_7d",
     "news_impact_score_3d",
     "news_decayed_sentiment_7d",
     "news_high_impact_count_3d",
@@ -47,8 +97,14 @@ MODEL_FEATURES = [
     "market_news_sentiment_3d",
     "market_news_sentiment_7d",
     "market_news_impact_score_3d",
-    "market_news_count_3d",
     "market_macro_event_count_3d",
+
+    # event flags
+    "macro_event_flag_3d",
+    "earnings_event_flag_3d",
+    "company_event_flag_3d",
+    "high_impact_flag_3d",
+    "market_macro_flag_3d",
 ]
 
 MIN_MODEL_ROWS = 90
@@ -57,9 +113,6 @@ RECENT_MODEL_WINDOW = 260
 NEWS_MAX_HEADLINES_PER_SYMBOL = 35
 MARKET_NEWS_MAX_HEADLINES = 60
 NEWS_LOOKBACK_DAYS = 14
-
-PREDICTION_HORIZON_DAYS = 3
-TARGET_RETURN_THRESHOLD = 0.01
 
 WALK_FORWARD_TRAIN_WINDOW = 100
 WALK_FORWARD_TEST_WINDOW = 20

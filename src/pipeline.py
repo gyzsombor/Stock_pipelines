@@ -18,7 +18,7 @@ from config import (
     WATCHLIST_PATH,
     WINDOW_DAYS,
 )
-from features import add_features
+from features import add_post_news_features, build_features
 from io_utils import ensure_dirs, fetch_ohlcv_batch, load_watchlist
 from news_features import (
     build_daily_news_features,
@@ -32,19 +32,15 @@ from signals import add_signal
 
 REQUIRED_FEATURE_COLUMNS = [
     "daily_return_pct",
-    "ma_30",
+    "return_5d_pct",
     "ma_spread_pct",
-    "volatility_7d",
-    "volatility_30d_annualized",
+    "volatility_20d_annualized",
     "rsi_14",
-    "cumulative_return_pct",
     "drawdown_pct",
-    "rolling_risk_adjusted_30",
-    "return_7d_pct",
-    "return_30d_pct",
-    "return_90d_pct",
-    "rel_return_30d_pct",
-    "rel_return_90d_pct",
+    "spy_return_1d",
+    "asset_vs_spy_20d",
+    "beta_like_20d",
+    "corr_to_spy_20d",
 ]
 
 
@@ -103,7 +99,8 @@ def add_news_data(clean: pd.DataFrame, symbols: list[str]) -> pd.DataFrame:
         return merge_news_features_into_market(clean, news_daily)
 
     except Exception as exc:
-         raise RuntimeError(f"NEWS PIPELINE FAILED: {exc}")
+        raise RuntimeError(f"NEWS PIPELINE FAILED: {exc}")
+
 
 def main() -> None:
     ensure_dirs()
@@ -115,8 +112,11 @@ def main() -> None:
     print(symbols)
 
     raw = prepare_raw_data(symbols)
-    clean = add_signal(add_features(raw))
+
+    clean = build_features(raw)
+    clean = add_signal(clean)
     clean = add_news_data(clean, symbols)
+    clean = add_post_news_features(clean)
 
     clean = clean.dropna(subset=REQUIRED_FEATURE_COLUMNS).reset_index(drop=True)
 

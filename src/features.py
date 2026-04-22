@@ -1,122 +1,143 @@
-
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-from config import BENCHMARK_SYMBOL, TRADING_DAYS_PER_YEAR
+from config import ASSET_CLASS_MAP, BENCHMARK_SYMBOL, TRADING_DAYS_PER_YEAR
 
 
-def add_features(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.sort_values(["symbol", "date"]).copy()
+def _safe_divide(a: pd.Series, b: pd.Series) -> pd.Series:
+    out = a / b.replace(0, np.nan)
+    return out.replace([np.inf, -np.inf], np.nan)
 
-    # Base returns
-    df["price_lag1"] = df.groupby("symbol")["close"].shift(1)
-    df["daily_return_decimal"] = df.groupby("symbol")["close"].pct_change()
-    df["daily_return_pct"] = df["daily_return_decimal"] * 100.0
 
-    # Trend
-    df["ma_7"] = df.groupby("symbol")["close"].transform(
-        lambda s: s.rolling(window=7, min_periods=7).mean()
-    )
-    df["ma_30"] = df.groupby("symbol")["close"].transform(
-        lambda s: s.rolling(window=30, min_periods=30).mean()
-    )
-    df["ma_spread_pct"] = ((df["ma_7"] / df["ma_30"]) - 1.0) * 100.0
-
-    # Volatility
-    df["volatility_7d"] = df.groupby("symbol")["daily_return_pct"].transform(
-        lambda s: s.rolling(window=7, min_periods=7).std()
-    )
-    df["volatility_30d_annualized"] = df.groupby("symbol")["daily_return_decimal"].transform(
-        lambda s: s.rolling(window=30, min_periods=30).std() * np.sqrt(TRADING_DAYS_PER_YEAR) * 100.0
-    )
-
-    # Volume
-    vol_mean_30 = df.groupby("symbol")["volume"].transform(
-        lambda s: s.rolling(window=30, min_periods=30).mean()
-    )
-    vol_std_30 = df.groupby("symbol")["volume"].transform(
-        lambda s: s.rolling(window=30, min_periods=30).std()
-    )
-    df["volume_z_30"] = (df["volume"] - vol_mean_30) / vol_std_30.replace(0, np.nan)
-
-    # RSI(14)
-    delta = df.groupby("symbol")["close"].diff()
+def _rsi(series: pd.Series, window: int = 14) -> pd.Series:
+    delta = series.diff()
     gain = delta.clip(lower=0)
-    loss = (-delta).clip(lower=0)
+    loss = -delta.clip(upper=0)
 
-    avg_gain = gain.groupby(df["symbol"]).transform(
-        lambda s: s.rolling(window=14, min_periods=14).mean()
-    )
-    avg_loss = loss.groupby(df["symbol"]).transform(
-        lambda s: s.rolling(window=14, min_periods=14).mean()
-    )
+    avg_gain = gain.rolling(window=window, min_periods=window).mean()
+    avg_loss = loss.rolling(window=window, min_periods=window).mean()
 
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    df["rsi_14"] = 100 - (100 / (1 + rs))
-    df.loc[(avg_loss == 0) & (avg_gain > 0), "rsi_14"] = 100
-    df.loc[(avg_loss == 0) & (avg_gain == 0), "rsi_14"] = 50
+    rs = _safe_divide(avg_gain, avg_loss)
+    return 100 - (100 / (1 + rs))
 
-    # Cumulative return
-    df["cumulative_return_pct"] = df.groupby("symbol")["daily_return_decimal"].transform(
-        lambda s: ((1 + s.fillna(0)).cumprod() - 1) * 100.0
-    )
 
-    # Drawdown
-    rolling_peak = df.groupby("symbol")["close"].transform(lambda s: s.cummax())
-    df["drawdown_pct"] = ((df["close"] - rolling_peak) / rolling_peak) * 100.0
+def _asset_class_flags(symbol: str) -> dict:
+    cls = ASSET_CLASS_MAP.get(symbol, "unknown")
+    return {
+        "is_equity": 1 if cls == "equity" else 0,
+        "is_fund": 1 if cls == "fund" else 0,
+        "is_crypto": 1 if cls == "crypto" else 0,
+        "is_commodity": 1 if cls == "commodity" else 0,
+    }
 
-    # Rolling risk-adjusted return
-    rolling_mean_30 = df.groupby("symbol")["daily_return_decimal"].transform(
-        lambda s: s.rolling(window=30, min_periods=30).mean()
-    )
-    rolling_std_30 = df.groupby("symbol")["daily_return_decimal"].transform(
-        lambda s: s.rolling(window=30, min_periods=30).std()
-    )
-    df["rolling_risk_adjusted_30"] = (
-        (rolling_mean_30 / rolling_std_30.replace(0, np.nan)) * np.sqrt(TRADING_DAYS_PER_YEAR)
-    )
 
-    # Multi-period returns
-    df["return_7d_pct"] = df.groupby("symbol")["close"].transform(
-        lambda s: ((s / s.shift(7)) - 1) * 100.0
-    )
-    df["return_30d_pct"] = df.groupby("symbol")["close"].transform(
-        lambda s: ((s / s.shift(30)) - 1) * 100.0
-    )
-    df["return_90d_pct"] = df.groupby("symbol")["close"].transform(
-        lambda s: ((s / s.shift(90)) - 1) * 100.0
-    )
+def _add_regime_flags(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
 
-    # Regime
-    df["trend_regime"] = np.where(
-        df["ma_7"] > df["ma_30"],
-        "bullish",
-        np.where(df["ma_7"] < df["ma_30"], "bearish", "neutral")
-    )
+    out["market_regime_bull"] = ((out["ma_spread_pct"] > 1.0) & (out["asset_vs_spy_20d"] > 0)).astype(int)
+    out["market_regime_bear"] = ((out["ma_spread_pct"] < -1.0) & (out["asset_vs_spy_20d"] < 0)).astype(int)
+    out["market_regime_sideways"] = (
+        (out["market_regime_bull"] == 0) & (out["market_regime_bear"] == 0)
+    ).astype(int)
 
-    # Benchmark-relative features
-    bench = df[df["symbol"] == BENCHMARK_SYMBOL][
-        ["date", "return_30d_pct", "return_90d_pct", "ma_spread_pct"]
-    ].copy()
+    out["vol_regime_high"] = (out["volatility_20d_annualized"] >= 35).astype(int)
+    out["vol_regime_normal"] = (out["volatility_20d_annualized"] < 35).astype(int)
 
-    bench = bench.rename(
-        columns={
-            "return_30d_pct": "benchmark_return_30d_pct",
-            "return_90d_pct": "benchmark_return_90d_pct",
-            "ma_spread_pct": "benchmark_ma_spread_pct",
-        }
-    )
+    return out
 
-    df = df.merge(bench, on="date", how="left")
 
-    df["rel_return_30d_pct"] = df["return_30d_pct"] - df["benchmark_return_30d_pct"]
-    df["rel_return_90d_pct"] = df["return_90d_pct"] - df["benchmark_return_90d_pct"]
+def build_features(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce")
+    out = out.sort_values(["symbol", "date"]).reset_index(drop=True)
 
-    # Clean self-reference for benchmark symbol itself
-    bench_mask = df["symbol"] == BENCHMARK_SYMBOL
-    df.loc[bench_mask, "rel_return_30d_pct"] = 0.0
-    df.loc[bench_mask, "rel_return_90d_pct"] = 0.0
+    benchmark = out[out["symbol"] == BENCHMARK_SYMBOL][["date", "close"]].copy()
+    benchmark = benchmark.sort_values("date").reset_index(drop=True)
+    benchmark["spy_return_1d"] = benchmark["close"].pct_change()
+    benchmark["spy_return_5d"] = benchmark["close"].pct_change(5)
+    benchmark["spy_return_20d"] = benchmark["close"].pct_change(20)
+    benchmark["spy_volatility_20d"] = benchmark["spy_return_1d"].rolling(20).std()
+    benchmark = benchmark[
+        ["date", "spy_return_1d", "spy_return_5d", "spy_return_20d", "spy_volatility_20d"]
+    ]
 
-    return df
+    pieces = []
+
+    for symbol, g in out.groupby("symbol"):
+        temp = g.sort_values("date").copy()
+
+        temp["daily_return_decimal"] = temp["close"].pct_change()
+        temp["daily_return_pct"] = temp["daily_return_decimal"] * 100
+
+        temp["return_3d_pct"] = temp["close"].pct_change(3) * 100
+        temp["return_5d_pct"] = temp["close"].pct_change(5) * 100
+        temp["return_10d_pct"] = temp["close"].pct_change(10) * 100
+        temp["return_20d_pct"] = temp["close"].pct_change(20) * 100
+
+        temp["ma_10"] = temp["close"].rolling(10).mean()
+        temp["ma_20"] = temp["close"].rolling(20).mean()
+        temp["ma_50"] = temp["close"].rolling(50).mean()
+
+        temp["ma_spread_pct"] = _safe_divide(temp["ma_10"] - temp["ma_20"], temp["ma_20"]) * 100
+        temp["trend_strength_20_50"] = _safe_divide(temp["ma_20"] - temp["ma_50"], temp["ma_50"]) * 100
+
+        temp["volatility_10d_decimal"] = temp["daily_return_decimal"].rolling(10).std()
+        temp["volatility_20d_decimal"] = temp["daily_return_decimal"].rolling(20).std()
+
+        temp["volatility_10d_annualized"] = temp["volatility_10d_decimal"] * np.sqrt(TRADING_DAYS_PER_YEAR) * 100
+        temp["volatility_20d_annualized"] = temp["volatility_20d_decimal"] * np.sqrt(TRADING_DAYS_PER_YEAR) * 100
+        temp["volatility_ratio_10_20"] = _safe_divide(
+            temp["volatility_10d_annualized"], temp["volatility_20d_annualized"]
+        )
+
+        temp["rsi_14"] = _rsi(temp["close"], 14)
+
+        rolling_peak = temp["close"].cummax()
+        temp["drawdown_pct"] = ((temp["close"] / rolling_peak) - 1.0) * 100
+
+        temp["volume_ma_30"] = temp["volume"].rolling(30).mean()
+        temp["volume_std_30"] = temp["volume"].rolling(30).std()
+        temp["volume_z_30"] = _safe_divide(temp["volume"] - temp["volume_ma_30"], temp["volume_std_30"])
+
+        temp = temp.merge(benchmark, on="date", how="left")
+
+        temp["asset_vs_spy_1d"] = (temp["daily_return_decimal"] - temp["spy_return_1d"]) * 100
+        temp["asset_vs_spy_5d"] = ((temp["return_5d_pct"] / 100) - temp["spy_return_5d"]) * 100
+        temp["asset_vs_spy_20d"] = ((temp["return_20d_pct"] / 100) - temp["spy_return_20d"]) * 100
+
+        # rolling beta-like and correlation to benchmark
+        rolling_cov = temp["daily_return_decimal"].rolling(20).cov(temp["spy_return_1d"])
+        rolling_var = temp["spy_return_1d"].rolling(20).var()
+        temp["beta_like_20d"] = _safe_divide(rolling_cov, rolling_var)
+        temp["corr_to_spy_20d"] = temp["daily_return_decimal"].rolling(20).corr(temp["spy_return_1d"])
+
+        flags = _asset_class_flags(symbol)
+        for k, v in flags.items():
+            temp[k] = v
+
+        pieces.append(temp)
+
+    featured = pd.concat(pieces, ignore_index=True).sort_values(["symbol", "date"]).reset_index(drop=True)
+    featured = _add_regime_flags(featured)
+
+    # backward compatibility
+    featured["volatility_30d_annualized"] = featured["volatility_20d_annualized"]
+
+    return featured
+
+
+def add_post_news_features(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    # event flags from merged news columns
+    out["macro_event_flag_3d"] = (out["news_macro_event_count_3d"] > 0).astype(int)
+    out["earnings_event_flag_3d"] = (
+        (out.get("news_company_event_count_3d", 0) > 0) & (out.get("news_high_impact_count_3d", 0) > 0)
+    ).astype(int)
+    out["company_event_flag_3d"] = (out["news_company_event_count_3d"] > 0).astype(int)
+    out["high_impact_flag_3d"] = (out["news_high_impact_count_3d"] > 0).astype(int)
+    out["market_macro_flag_3d"] = (out["market_macro_event_count_3d"] > 0).astype(int)
+
+    return out
