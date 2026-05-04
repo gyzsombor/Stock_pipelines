@@ -1,0 +1,11 @@
+Task,Start Date,End Date,Status,Owner,Notes
+Project planning,2026-04-13,2026-04-14,Complete,Zsombor,Defined project objective and deliverables
+Data collection,2026-04-15,2026-04-16,Complete,Zsombor,Collected historical market data using yfinance
+Data preprocessing,2026-04-16,2026-04-18,Complete,Zsombor,Cleaned data and created market_clean.csv
+Feature engineering,2026-04-18,2026-04-21,Complete,Zsombor,Created returns, volatility, trend, RSI, and SPY-relative features
+Modeling,2026-04-21,2026-04-24,Complete,Zsombor,Trained Logistic Regression, Random Forest, and Gradient Boosting models
+Decision engine,2026-04-24,2026-04-28,Complete,Zsombor,Created confidence and model agreement based recommendation logic
+Backtesting,2026-04-28,2026-05-02,Complete,Zsombor,Compared baseline strategy against decision engine
+Streamlit app,2026-05-02,2026-05-04,Complete,Zsombor,Built interactive dashboard and results display
+Final paper,2026-05-04,2026-05-06,Complete,Zsombor,Writing final PDF paper
+Presentation,2026-05-05,2026-05-08,Complete,Zsombor,Preparing slides and demo
