@@ -16,7 +16,7 @@ NEWS_DAILY_FEATURES_PATH = "data/news_daily_features.csv"
 BENCHMARK_SYMBOL = "SPY"
 REFRESH_AFTER_HOURS = 8
 MAX_COMPARE_DEFAULT = 3
-APP_TITLE = "AI-Assisted Market Analyst Engine"
+APP_TITLE = "Market Signal & Risk Engine"
 
 # -----------------------------
 # Asset class mapping

@@ -14,7 +14,9 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from config import (
+from src.decision_engine import apply_calibration, compute_position_size, get_decision_label, get_decision_explanation
+
+from src.config import (
     ASSET_CLASS_MAP,
     ASSET_CLASS_TARGET_FLOOR,
     DEFAULT_PROB_THRESHOLD,
@@ -60,23 +62,27 @@ def _prepare_symbol_model_data(df: pd.DataFrame, symbol: str) -> tuple[pd.DataFr
         raise ValueError(f"No data found for symbol: {symbol}")
 
     subset["target_forward_return_decimal"] = (
-        subset["close"].shift(-PREDICTION_HORIZON_DAYS) / subset["close"]
+        subset["close"].shift(-3) / subset["close"]
     ) - 1.0
 
-    # volatility-adjusted target
+    # Only count strong directional moves for target labeling
+    subset["target_direction"] = 0
+    subset.loc[subset["target_forward_return_decimal"] > 0.01, "target_direction"] = 1
+    subset.loc[subset["target_forward_return_decimal"] < -0.01, "target_direction"] = -1
+
+    subset["target_up_move"] = (subset["target_direction"] == 1).astype(float)
+
+    # volatility-adjusted target remains available for diagnostics
     vol_decimal = subset["volatility_20d_annualized"] / 100 / np.sqrt(TRADING_DAYS_PER_YEAR)
     floor = _target_floor(symbol)
     subset["dynamic_target_threshold"] = np.maximum(floor, vol_decimal * np.sqrt(PREDICTION_HORIZON_DAYS) * VOL_TARGET_MULTIPLIER)
-
-    subset["target_up_move"] = (
-        subset["target_forward_return_decimal"] > subset["dynamic_target_threshold"]
-    ).astype(float)
 
     subset = subset.dropna(subset=MODEL_FEATURES).copy()
     subset = subset.tail(RECENT_MODEL_WINDOW).copy()
     labeled = subset.dropna(
         subset=["target_up_move", "target_forward_return_decimal", "dynamic_target_threshold"]
     ).copy()
+    labeled = labeled[labeled["target_direction"] != 0].copy()
 
     if len(labeled) < MIN_MODEL_ROWS:
         raise ValueError(
@@ -184,6 +190,16 @@ def _score_probs(y_true: pd.Series, probs: np.ndarray, threshold: float = 0.5) -
 
 
 def _evaluate_binary_model(name: str, model, X_test: pd.DataFrame, y_test: pd.Series) -> dict:
+    if not hasattr(model, 'predict_proba'):
+        # Skip models that don't support predict_proba (e.g., calibration models)
+        return {
+            "model": name,
+            "accuracy": 0.5,
+            "precision": 0.5,
+            "recall": 0.5,
+            "f1": 0.5,
+            "avg_predicted_up_probability": 0.5,
+        }
     probs = model.predict_proba(X_test)[:, 1]
     preds = (probs >= 0.5).astype(int)
     return {
@@ -334,7 +350,10 @@ def run_symbol_models(df: pd.DataFrame, symbol: str) -> tuple[pd.DataFrame, pd.D
         base_metrics["best_config"] = str(tune_row["best_config"])
         metrics_rows.append(base_metrics)
 
-        latest_prob = float(model.predict_proba(latest_feature_row)[:, 1][0])
+        if hasattr(model, 'predict_proba'):
+            latest_prob = float(model.predict_proba(latest_feature_row)[:, 1][0])
+        else:
+            latest_prob = 0.5  # Default for unsupported models
         latest_pred = int(latest_prob >= 0.5)
 
         latest_rows.append(
@@ -805,14 +824,23 @@ def final_recommendation_label(score: float) -> str:
     return "STRONG AVOID"
 
 
-def build_analyst_engine(latest_row: pd.Series, latest_preds: pd.DataFrame, wf_metrics: pd.DataFrame, calibration_model: IsotonicRegression | None = None) -> dict:
+def build_analyst_engine(latest_row: pd.Series, latest_preds: pd.DataFrame, wf_metrics: pd.DataFrame, calibration_model: IsotonicRegression | None = None, shorting_allowed: bool = False, version: str = "V3") -> dict:
     # -------------------------
     # Live ensemble weights
     # -------------------------
-    weights = {
-        "Gradient Boosting": 1.5,
-        "Random Forest": 1.1,
-    }
+    # Live ensemble weights (V3: GB + RF only; V2: all models)
+    # -------------------------
+    if version == "V2":
+        weights = {
+            "Gradient Boosting": 1.5,
+            "Random Forest": 1.1,
+            "Logistic Regression": 0.4,
+        }
+    else:  # V3
+        weights = {
+            "Gradient Boosting": 1.5,
+            "Random Forest": 1.1,
+        }
 
     model_outputs = {}
     for _, row in latest_preds.iterrows():
@@ -829,6 +857,8 @@ def build_analyst_engine(latest_row: pd.Series, latest_preds: pd.DataFrame, wf_m
         total_weight += w
 
     ensemble_prob = 0.5 if total_weight == 0 else sum(weighted_probs) / total_weight
+    ensemble_prob = max(0.0, min(1.0, ensemble_prob))
+
     score = (ensemble_prob - 0.5) * 2.0  # centered score in [-1, 1]
 
     # -------------------------
@@ -874,20 +904,6 @@ def build_analyst_engine(latest_row: pd.Series, latest_preds: pd.DataFrame, wf_m
         news_label = "Low"
 
     # -------------------------
-    # Recommendation
-    # -------------------------
-    if score > 0.20:
-        decision = "BUY"
-    elif score > 0.05:
-        decision = "WEAK BUY"
-    elif score < -0.20:
-        decision = "AVOID"
-    elif score < -0.05:
-        decision = "WEAK AVOID"
-    else:
-        decision = "HOLD"
-
-    # -------------------------
     # Confidence
     # -------------------------
     raw_confidence = (
@@ -897,14 +913,11 @@ def build_analyst_engine(latest_row: pd.Series, latest_preds: pd.DataFrame, wf_m
     )
     raw_confidence = min(float(raw_confidence), 0.85)
 
-    # Apply calibration if available
+    # Apply calibration
+    calibrated_confidence = raw_confidence
     if calibration_model is not None:
-        calibrated_confidence = float(calibration_model.predict([raw_confidence])[0])
-        calibrated_confidence = clip01(calibrated_confidence)  # Ensure [0,1]
-    else:
-        calibrated_confidence = raw_confidence
-
-    confidence = calibrated_confidence  # Use calibrated for display
+        calibrated_confidence = apply_calibration(raw_confidence, calibration_model)
+    confidence = calibrated_confidence
 
     if confidence >= 0.72:
         confidence_band = "High"
@@ -914,21 +927,24 @@ def build_analyst_engine(latest_row: pd.Series, latest_preds: pd.DataFrame, wf_m
         confidence_band = "Low"
 
     # -------------------------
-    # Dynamic Position Sizing
-    # Scales position size with calibrated confidence and reduces for risk
-    # Formula: direction * calibrated_confidence * (1 - risk_penalty), bounded [-0.4, 0.4]
+    # Recommendation
     # -------------------------
-    if decision in ["BUY", "WEAK BUY"]:
-        direction = 1.0
-    elif decision in ["AVOID", "WEAK AVOID"]:
-        direction = -1.0
+    if score > 0.05 and calibrated_confidence >= 0.50:
+        decision = "BUY"
+    elif score < -0.05:
+        if shorting_allowed and calibrated_confidence >= 0.50:
+            decision = "SELL"
+        else:
+            decision = "AVOID"
     else:
-        direction = 0.0
+        decision = "HOLD"
 
-    # Conservative sizing: calibrated confidence drives size, risk penalty reduces it
-    base_size = calibrated_confidence * direction
-    risk_adjusted_size = base_size * (1 - risk_penalty)
-    recommended_position_size = float(np.clip(risk_adjusted_size, -0.4, 0.4))  # Conservative bounds
+    # -------------------------
+    # Dynamic Position Sizing
+    # -------------------------
+    recommended_position_size = compute_position_size(
+        ensemble_prob, calibrated_confidence, shorting_allowed, agreement
+    )
 
     # -------------------------
     # Validation quality
@@ -1026,14 +1042,16 @@ def build_analyst_engine(latest_row: pd.Series, latest_preds: pd.DataFrame, wf_m
         "recommendation": decision,
         "recommendation_score": float(ensemble_prob),
         "confidence_score": float(confidence),
+        "confidence_band": confidence_band,
         "raw_confidence": float(raw_confidence),
         "calibrated_confidence": float(calibrated_confidence),
         "recommended_position_size": recommended_position_size,
-        "confidence_band": confidence_band,
+        "decision_label": get_decision_label(ensemble_prob, calibrated_confidence, shorting_allowed),
         "technical_probability": float(0.5 + 0.5 * score),
         "model_probability": float(ensemble_prob),
         "context_probability": float(news_strength),
         "model_agreement": agreement_label,
+        "model_agreement_score": float(agreement),
         "risk_level": risk_label,
         "risk_penalty": float(risk_penalty),
         "news_support": news_label,
@@ -1046,19 +1064,25 @@ def build_analyst_engine(latest_row: pd.Series, latest_preds: pd.DataFrame, wf_m
         "reasons": reasons,
         "model_breakdown": model_breakdown,
         "component_table": component_table,
+        "explanation": get_decision_explanation({
+            "recommendation": decision,
+            "recommendation_score": float(ensemble_prob),
+            "confidence_score": float(confidence),
+            "position_size": recommended_position_size,
+        }, latest_row.to_dict(), shorting_allowed),
     }
 
 
 def build_analyst_memo(symbol: str, latest_row: pd.Series, analyst: dict) -> str:
-    trend_regime = analyst["regime"]["trend_regime"]
-    vol_regime = analyst["regime"]["vol_regime"]
-    strength_regime = analyst["regime"]["strength_regime"]
+    trend_regime = analyst.get("regime", {}).get("trend_regime", "Unknown")
+    vol_regime = analyst.get("regime", {}).get("vol_regime", "Unknown")
+    strength_regime = analyst.get("regime", {}).get("strength_regime", "Unknown")
 
-    decision = analyst["recommendation"]
-    confidence = analyst["confidence_band"]
-    agreement = analyst["model_agreement"]
-    news_support = analyst["news_support"]
-    risk_level = analyst["risk_level"]
+    decision = analyst.get("recommendation", "HOLD")
+    confidence = analyst.get("confidence_band", "Unknown")
+    agreement = analyst.get("model_agreement", "Unknown")
+    news_support = analyst.get("news_support", "Unknown")
+    risk_level = analyst.get("risk_level", "Unknown")
 
     return (
         f"For {symbol}, the engine currently assigns a {decision} view with {confidence.lower()} confidence. "

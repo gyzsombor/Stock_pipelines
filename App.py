@@ -320,7 +320,7 @@ def plot_walkforward_equity(predictions_df: pd.DataFrame) -> go.Figure:
 
 
 st.title(APP_TITLE)
-st.caption("AI-assisted analyst engine with explainable decision logic, technical validation, news context, and portfolio research.")
+st.caption("Market signal and risk engine with explainable decision logic, technical validation, news context, and portfolio research.")
 
 st.sidebar.header("Main Controls")
 
@@ -362,13 +362,10 @@ portfolio_symbols = st.sidebar.multiselect("Portfolio Assets", symbols_filtered,
 benchmark_symbol = BENCHMARK_SYMBOL if BENCHMARK_SYMBOL in symbols_filtered else (symbols_filtered[0] if symbols_filtered else BENCHMARK_SYMBOL)
 
 with st.sidebar.expander("Optional Settings", expanded=False):
-    prob_threshold = st.slider(
-        "Model Confidence Threshold",
-        min_value=0.50,
-        max_value=0.80,
-        value=float(DEFAULT_PROB_THRESHOLD),
-        step=0.01,
-        help="Higher threshold means the system requires stronger model support before acting.",
+    shorting_allowed = st.toggle(
+        "Allow Short Positions",
+        value=False,
+        help="Enable short selling for the strategy. When disabled, only long positions are taken.",
     )
     transaction_cost_bps = st.number_input(
         "Estimated Trading Cost (bps)",
@@ -419,6 +416,8 @@ try:
 except Exception as e:
     model_error = str(e)
 
+wf_predictions = None
+wf_metrics = None
 calibration_model = None
 
 # Check if data has all required features before walk-forward
@@ -442,7 +441,7 @@ analyst_error = None
 analyst = None
 
 try:
-    analyst = build_analyst_engine(latest_row, latest_preds, wf_metrics, calibration_model)
+    analyst = build_analyst_engine(latest_row, latest_preds, wf_metrics, calibration_model, shorting_allowed)
 except Exception as e:
     analyst_error = str(e)
 
@@ -457,9 +456,16 @@ if analyst_error is not None:
 if analyst is not None:
     llm_note = generate_analyst_memo_llm(selected_symbol, latest_row, analyst)
 
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        st.markdown(card_html("Decision", analyst["recommendation"]), unsafe_allow_html=True)
+        decision = analyst["recommendation"]
+        if decision == "Buy":
+            caption = "Risk-adjusted long exposure"
+        elif decision in ["Short / Sell"]:
+            caption = "Risk-adjusted short exposure"
+        else:
+            caption = "Signal not strong enough to enter"
+        st.markdown(card_html("Decision", decision, caption), unsafe_allow_html=True)
     with c2:
         st.markdown(card_html("Confidence", f'{analyst["confidence_score"]:.2f}', analyst["confidence_band"]), unsafe_allow_html=True)
     with c3:
@@ -468,12 +474,10 @@ if analyst is not None:
         st.markdown(card_html("Risk Level", analyst["risk_level"]), unsafe_allow_html=True)
     with c5:
         st.markdown(card_html("News Support", analyst["news_support"]), unsafe_allow_html=True)
-    with c6:
-        st.markdown(card_html("Position Size", f'{analyst["recommended_position_size"]:.2f}'), unsafe_allow_html=True)
 
     section_title(
-        "Analyst Memo",
-        "This is the professional-language explanation layer. It turns model outputs, technical structure, and news context into readable analyst-style guidance.",
+        "Signal & Risk Memo",
+        "This is the professional-language explanation layer. It turns model outputs, technical structure, and news context into readable signal and risk guidance.",
     )
     st.markdown(f"<div class='memo-box'>{llm_note['memo']}</div>", unsafe_allow_html=True)
 
@@ -652,7 +656,7 @@ with strategy_tab:
     except Exception as e:
         st.info(f"Recommendation backtest unavailable: {e}")
 
-    if not wf_metrics.empty:
+    if wf_metrics is not None and not wf_metrics.empty:
         st.markdown("**Walk-Forward Validation**")
         st.dataframe(wf_metrics, use_container_width=True)
         st.plotly_chart(plot_walkforward_equity(wf_predictions), use_container_width=True)
@@ -735,6 +739,49 @@ with portfolio_tab:
         except Exception as e:
             st.warning(f"Portfolio analysis unavailable: {e}")
 
+    # V2 vs V3 Comparison
+    if st.button("Run V2 vs V3 Comparison", use_container_width=True):
+        try:
+            from backtest import run_v2_v3_comparison_backtest
+            comparison_df, per_symbol_df, skipped_symbols, debug_stats = run_v2_v3_comparison_backtest(
+                filtered_data,
+                portfolio_symbols,
+                train_window=int(train_window),
+                test_window=int(test_window),
+                transaction_cost_bps=float(transaction_cost_bps),
+                slippage_bps=float(slippage_bps),
+            )
+            st.markdown("**V2 vs V3 Strategy Comparison (Aggregate)**")
+            st.dataframe(comparison_df, use_container_width=True)
+            
+            st.markdown("**V2 vs V3 Strategy Comparison (Per Symbol)**")
+            # Display per-symbol table with interpretation and warnings
+            display_cols = ["symbol", "version", "total_return_pct", "sharpe_like", "max_drawdown_pct", 
+                          "win_rate_pct", "number_of_trades", "avg_confidence", "avg_agreement", 
+                          "interpretation", "warning"]
+            st.dataframe(per_symbol_df[display_cols], use_container_width=True)
+            
+            if skipped_symbols:
+                st.warning(f"Skipped symbols: {', '.join(skipped_symbols)}")
+            
+            # Debug expander showing position generation details
+            with st.expander("Position Generation Details", expanded=False):
+                if debug_stats:
+                    debug_df = pd.DataFrame([
+                        {"symbol_version": k, **v}
+                        for k, v in debug_stats.items()
+                    ])
+                    st.dataframe(debug_df, use_container_width=True)
+                    
+                    # Summary check
+                    total_nonzero = sum(v.get("nonzero_positions", 0) for v in debug_stats.values())
+                    if total_nonzero == 0:
+                        st.warning("⚠️ No nonzero positions were generated. Check confidence and agreement thresholds.")
+                    else:
+                        st.success(f"✓ {total_nonzero} total nonzero positions across all symbols/versions")
+        except Exception as e:
+            st.error(f"V2 vs V3 comparison failed: {e}")
+
 with advanced_tab:
     section_title(
         "Advanced Research",
@@ -747,7 +794,7 @@ with advanced_tab:
         st.warning(f"Walk-forward metrics unavailable: {wf_error}")
 
     # Calibration diagnostics
-    if not wf_metrics.empty and "brier_score" in wf_metrics.columns:
+    if wf_metrics is not None and not wf_metrics.empty and "brier_score" in wf_metrics.columns:
         st.markdown("**Calibration Diagnostics**")
         best_brier = wf_metrics["brier_score"].min()
         st.metric("Best Brier Score", f"{best_brier:.3f}")
@@ -795,7 +842,7 @@ with advanced_tab:
                 st.info(f"Recommendation history unavailable: {e}")
 
     with st.expander("Exports", expanded=False):
-        if not wf_predictions.empty and not wf_backtest.empty:
+        if wf_predictions is not None and not wf_predictions.empty and wf_backtest is not None and not wf_backtest.empty:
             pred_csv = wf_predictions.to_csv(index=False).encode("utf-8")
             bt_csv = wf_backtest.to_csv(index=False).encode("utf-8")
 
